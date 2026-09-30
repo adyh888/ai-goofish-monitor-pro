@@ -285,18 +285,41 @@ async def update_ai_settings(settings: AISettingsModel):
 
 @router.post("/ai/models")
 async def list_ai_models(settings: dict):
-    """从服务商拉取可用模型列表（OpenAI 兼容 /models 接口）"""
+    """从服务商拉取可用模型列表（OpenAI 兼容 /models 接口）。
+
+    body 可传 profile_id：用已保存模型配置的 Base URL / API Key / 代理
+    （用于编辑时 API Key 不回显的场景），否则用 body 里的显式值。
+    """
     try:
         from openai import OpenAI
         import httpx
 
-        base_url = (settings.get("OPENAI_BASE_URL") or "").strip()
+        profile_id = settings.get("profile_id")
+        profile = None
+        if profile_id:
+            from src.infrastructure.persistence.ai_profile_repository import (
+                get_profile_sync,
+            )
+
+            profile = get_profile_sync(int(profile_id))
+            if profile is None:
+                return {"success": False, "models": [], "message": "模型配置不存在"}
+
+        base_url = (
+            (settings.get("OPENAI_BASE_URL") or "").strip()
+            or (profile.base_url if profile else "")
+        )
         if not base_url:
             return {"success": False, "models": [], "message": "请先填写 API Base URL"}
 
         stored_api_key = env_manager.get_value("OPENAI_API_KEY", "")
         submitted_api_key = settings.get("OPENAI_API_KEY", "")
-        api_key = submitted_api_key or stored_api_key or "no-key-required"
+        api_key = (
+            submitted_api_key
+            or (profile.api_key if profile else "")
+            or stored_api_key
+            or "no-key-required"
+        )
 
         client_params = {
             "api_key": api_key,
@@ -304,7 +327,9 @@ async def list_ai_models(settings: dict):
             "timeout": httpx.Timeout(30.0),
         }
 
-        proxy_url = settings.get("PROXY_URL", "")
+        proxy_url = (
+            settings.get("PROXY_URL") or (profile.proxy_url if profile else "") or ""
+        )
         if proxy_url:
             client_params["http_client"] = httpx.Client(proxy=proxy_url)
 
@@ -324,6 +349,37 @@ async def list_ai_models(settings: dict):
             "models": [],
             "message": f"获取模型列表失败: {exc}",
         }
+
+
+def _perform_ai_test(client, model_name: str) -> str:
+    """用给定客户端执行一次最小的 AI 调用，返回响应文本（含 API 模式回退）。"""
+    api_mode = CHAT_COMPLETIONS_API_MODE
+    try:
+        response = create_ai_response_sync(
+            client,
+            api_mode,
+            build_ai_request_params(
+                api_mode,
+                model=model_name,
+                messages=[{"role": "user", "content": AI_TEST_PROMPT}],
+                max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
+            ),
+        )
+    except Exception as exc:
+        if not is_chat_completions_api_unsupported_error(exc):
+            raise
+        api_mode = RESPONSES_API_MODE
+        response = create_ai_response_sync(
+            client,
+            api_mode,
+            build_ai_request_params(
+                api_mode,
+                model=model_name,
+                messages=[{"role": "user", "content": AI_TEST_PROMPT}],
+                max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
+            ),
+        )
+    return extract_ai_response_content(response)
 
 
 @router.post("/ai/test")
@@ -349,42 +405,190 @@ async def test_ai_settings(settings: dict):
 
         model_name = settings.get("OPENAI_MODEL_NAME", "")
         client = OpenAI(**client_params)
-        messages = [{"role": "user", "content": AI_TEST_PROMPT}]
-        api_mode = CHAT_COMPLETIONS_API_MODE
 
-        try:
-            response = create_ai_response_sync(
-                client,
-                api_mode,
-                build_ai_request_params(
-                    api_mode,
-                    model=model_name,
-                    messages=messages,
-                    max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
-                ),
-            )
-        except Exception as exc:
-            if not is_chat_completions_api_unsupported_error(exc):
-                raise
-            api_mode = RESPONSES_API_MODE
-            response = create_ai_response_sync(
-                client,
-                api_mode,
-                build_ai_request_params(
-                    api_mode,
-                    model=model_name,
-                    messages=messages,
-                    max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
-                ),
-            )
-
+        response_text = _perform_ai_test(client, model_name)
         return {
             "success": True,
             "message": "AI模型连接测试成功！",
-            "response": extract_ai_response_content(response),
+            "response": response_text,
         }
     except Exception as exc:
         return {
             "success": False,
             "message": f"AI模型连接测试失败: {exc}",
+        }
+
+
+class AIProfileModel(BaseModel):
+    """AI 模型配置（多模型）"""
+
+    name: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model_name: Optional[str] = None
+    proxy_url: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+def _mask_profile(profile):
+    key = profile.api_key or ""
+    return {
+        "id": profile.id,
+        "name": profile.name,
+        "base_url": profile.base_url,
+        "model_name": profile.model_name,
+        "proxy_url": profile.proxy_url,
+        "enabled": profile.enabled,
+        "is_active": profile.is_active,
+        "sort_order": profile.sort_order,
+        "has_api_key": bool(key),
+        "api_key_hint": (f"****{key[-4:]}" if len(key) >= 8 else ""),
+    }
+
+
+def _validate_profile_payload(payload: dict, *, require_all: bool) -> tuple[dict, str | None]:
+    data = {}
+    name = payload.get("name")
+    base_url = (payload.get("base_url") or "").strip() if payload.get("base_url") is not None else None
+    model_name = (payload.get("model_name") or "").strip() if payload.get("model_name") is not None else None
+    if require_all and (not name or not str(name).strip()):
+        return {}, "请填写备注名"
+    if require_all and not base_url:
+        return {}, "请填写 API Base URL"
+    if require_all and not model_name:
+        return {}, "请填写模型名称"
+    if name is not None:
+        data["name"] = str(name).strip()
+    if base_url is not None:
+        data["base_url"] = base_url
+    if model_name is not None:
+        data["model_name"] = model_name
+    if payload.get("api_key") is not None:
+        data["api_key"] = str(payload["api_key"]).strip()
+    if payload.get("proxy_url") is not None:
+        data["proxy_url"] = str(payload["proxy_url"]).strip()
+    if payload.get("enabled") is not None:
+        data["enabled"] = bool(payload["enabled"])
+    return data, None
+
+
+@router.get("/ai/profiles")
+async def get_ai_profiles():
+    from src.infrastructure.persistence.ai_profile_repository import list_profiles_sync
+
+    return {"profiles": [_mask_profile(p) for p in list_profiles_sync()]}
+
+
+@router.post("/ai/profiles")
+async def create_ai_profile(payload: AIProfileModel):
+    from src.infrastructure.persistence.ai_profile_repository import create_profile_sync
+
+    data, error = _validate_profile_payload(
+        payload.model_dump(exclude_none=True), require_all=True
+    )
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+    profile = create_profile_sync(**data)
+    return {"message": f"模型配置 [{profile.name}] 已添加", "profile": _mask_profile(profile)}
+
+
+@router.put("/ai/profiles/{profile_id}")
+async def update_ai_profile(profile_id: int, payload: AIProfileModel):
+    from src.infrastructure.persistence.ai_profile_repository import (
+        get_profile_sync,
+        update_profile_sync,
+    )
+
+    if get_profile_sync(profile_id) is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    data, error = _validate_profile_payload(payload.model_dump(exclude_none=True), require_all=False)
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+    profile = update_profile_sync(profile_id, **data)
+    return {"message": f"模型配置 [{profile.name}] 已更新", "profile": _mask_profile(profile)}
+
+
+@router.delete("/ai/profiles/{profile_id}")
+async def delete_ai_profile(profile_id: int):
+    from src.infrastructure.persistence.ai_profile_repository import delete_profile_sync
+
+    if not delete_profile_sync(profile_id):
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    return {"message": "模型配置已删除"}
+
+
+@router.post("/ai/profiles/{profile_id}/activate")
+async def activate_ai_profile(profile_id: int):
+    from src.infrastructure.persistence.ai_profile_repository import (
+        set_active_profile_sync,
+    )
+
+    profile = set_active_profile_sync(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    return {"message": f"当前模型已切换为 [{profile.name}]", "profile": _mask_profile(profile)}
+
+
+@router.post("/ai/profiles/{profile_id}/enabled")
+async def toggle_ai_profile(profile_id: int, payload: dict):
+    from src.infrastructure.persistence.ai_profile_repository import (
+        set_profile_enabled_sync,
+    )
+
+    enabled = bool(payload.get("enabled"))
+    profile = set_profile_enabled_sync(profile_id, enabled)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    return {
+        "message": f"模型 [{profile.name}] 已{'启用' if enabled else '停用'}",
+        "profile": _mask_profile(profile),
+    }
+
+
+@router.post("/ai/profiles/{profile_id}/move")
+async def move_ai_profile(profile_id: int, payload: dict):
+    from src.infrastructure.persistence.ai_profile_repository import (
+        move_profile_sync,
+        get_profile_sync,
+    )
+
+    direction = payload.get("direction")
+    if direction not in ("up", "down"):
+        raise HTTPException(status_code=422, detail="direction 仅支持 up/down")
+    if get_profile_sync(profile_id) is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    profiles = move_profile_sync(profile_id, direction)
+    return {"message": "排序已更新", "profiles": [_mask_profile(p) for p in profiles]}
+
+
+@router.post("/ai/profiles/{profile_id}/test")
+async def test_ai_profile(profile_id: int):
+    """用已保存的模型配置（含不回显的 API Key）测试连接"""
+    from src.infrastructure.persistence.ai_profile_repository import get_profile_sync
+
+    profile = get_profile_sync(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    try:
+        from openai import OpenAI
+        import httpx
+
+        client_params = {
+            "api_key": profile.api_key or "no-key-required",
+            "base_url": profile.base_url,
+            "timeout": httpx.Timeout(30.0),
+        }
+        if profile.proxy_url:
+            client_params["http_client"] = httpx.Client(proxy=profile.proxy_url)
+        client = OpenAI(**client_params)
+        response_text = _perform_ai_test(client, profile.model_name)
+        return {
+            "success": True,
+            "message": f"模型 [{profile.name}] 连接测试成功！",
+            "response": response_text,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "message": f"模型 [{profile.name}] 连接测试失败: {exc}",
         }

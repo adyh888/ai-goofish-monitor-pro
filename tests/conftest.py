@@ -22,6 +22,15 @@ from src.services.task_service import TaskService
 from src.services.task_generation_service import TaskGenerationService
 
 
+@pytest.fixture(autouse=True)
+def _isolated_database(tmp_path, monkeypatch):
+    """每个测试使用独立的临时 SQLite，并清空 AI 环境变量，
+    避免测试读写真实数据库或触发 .env→ai_profiles 迁移导入。"""
+    monkeypatch.setenv("APP_DATABASE_FILE", str(tmp_path / "test-isolated.sqlite3"))
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL_NAME", raising=False)
+
+
 @pytest.fixture()
 def fixtures_dir() -> Path:
     return Path(__file__).parent / "fixtures"

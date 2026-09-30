@@ -301,11 +301,51 @@ async def send_ntfy_notification(product_data, reason):
     return results
 
 
+def _load_enabled_profiles():
+    """读取启用的 AI 模型配置（当前模型优先）。失败时返回空列表走 .env 兜底。"""
+    try:
+        from src.infrastructure.persistence.ai_profile_repository import (
+            list_enabled_profiles_active_first_sync,
+        )
+
+        return list_enabled_profiles_active_first_sync()
+    except Exception as e:
+        safe_print(f"   [AI分析] 读取多模型配置失败，回退到 .env 单模型配置: {e}")
+        return []
+
+
+def _build_profile_client(profile):
+    import httpx
+    from openai import AsyncOpenAI
+
+    client_kwargs = {
+        "api_key": profile.api_key or "no-key-required",
+        "base_url": profile.base_url,
+    }
+    if profile.proxy_url:
+        client_kwargs["http_client"] = httpx.AsyncClient(proxy=profile.proxy_url)
+    return AsyncOpenAI(**client_kwargs)
+
+
+async def _close_client_quietly(client) -> None:
+    closer = getattr(client, "close", None)
+    if closer is None:
+        return
+    try:
+        result = closer()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception:
+        pass
+
+
 async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
-    """将完整的商品JSON数据和所有图片发送给 AI 进行分析（异步）。"""
-    if not client:
-        safe_print("   [AI分析] 错误：AI客户端未初始化，跳过分析。")
-        return None
+    """将完整的商品JSON数据和所有图片发送给 AI 进行分析（异步）。
+
+    多模型 failover：从当前激活模型开始按优先级尝试，任一模型调用失败
+    （额度用完/限流/认证失效/格式异常等）自动切换到下一个启用的模型；
+    非首个候选成功时把激活位持久切换到该模型。
+    """
 
     item_info = product_data.get('商品信息', {})
     product_id = item_info.get('商品ID', 'N/A')
@@ -374,6 +414,65 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
     except Exception as e:
         safe_print(f"   [日志] 保存AI分析日志时出错: {e}")
 
+    # 多模型 failover：候选 = 启用的模型配置（激活优先）；无配置时回退 .env 单模型
+    profiles = _load_enabled_profiles()
+    if profiles:
+        candidates = list(profiles)
+    elif client is not None:
+        candidates = [None]  # None 代表 .env 兜底配置
+    else:
+        safe_print("   [AI分析] 错误：未配置任何 AI 模型（多模型配置为空且 .env 未配置），跳过分析。")
+        return None
+
+    last_error: Exception | None = None
+    for idx, profile in enumerate(candidates):
+        if profile is None:
+            use_client = client
+            model_name = MODEL_NAME
+            profile_label = ".env配置"
+        else:
+            use_client = _build_profile_client(profile)
+            model_name = profile.model_name
+            profile_label = profile.name
+
+        try:
+            result = await _run_analysis_attempts(
+                use_client, model_name, messages, product_id, profile_label
+            )
+            if idx > 0 and profile is not None:
+                try:
+                    from src.infrastructure.persistence.ai_profile_repository import (
+                        set_active_profile_sync,
+                    )
+
+                    set_active_profile_sync(profile.id)
+                    safe_print(f"   [AI分析] 当前模型已切换为 [{profile_label}]")
+                except Exception as switch_error:
+                    safe_print(f"   [AI分析] 切换当前模型失败: {switch_error}")
+            return result
+        except Exception as e:
+            last_error = e
+            if idx < len(candidates) - 1:
+                safe_print(
+                    f"   [AI分析] 模型[{profile_label}] 调用失败: {e}"
+                )
+                safe_print(
+                    f"   [AI分析] 自动切换到下一个模型（还剩 {len(candidates) - idx - 1} 个候选）..."
+                )
+                continue
+            raise
+        finally:
+            # 只关闭本次为 profile 新建的客户端；.env 兜底的 client 是进程级共享的，不能关
+            if profile is not None:
+                await _close_client_quietly(use_client)
+
+    raise last_error  # pragma: no cover - 循环内必然 return 或 raise
+
+
+async def _run_analysis_attempts(
+    client, model_name, messages, product_id, profile_label
+):
+    """对单个模型执行带重试的分析调用（处理格式重试与 API 兼容性回退）。"""
     # 增强的AI调用，包含更严格的结构化输出控制和重试机制
     max_retries = 4
     api_mode = CHAT_COMPLETIONS_API_MODE
@@ -388,7 +487,7 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
 
             request_params = build_ai_request_params(
                 api_mode,
-                model=MODEL_NAME,
+                model=model_name,
                 messages=messages,
                 temperature=current_temperature,
                 # 8192：推理型模型即使关闭思考失败时，思考文本也会挤占输出上限，
@@ -402,7 +501,7 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
             request_params = get_ai_request_params(**request_params)
 
             if AI_DEBUG_MODE:
-                safe_print(f"\n--- [AI DEBUG] 第{attempt + 1}次尝试 REQUEST ---")
+                safe_print(f"\n--- [AI DEBUG] {profile_label} 第{attempt + 1}次尝试 REQUEST ---")
                 safe_print(
                     json.dumps(
                         _build_debug_request_summary(api_mode, request_params),
@@ -420,7 +519,7 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
             ai_response_content = extract_ai_response_content(response)
 
             if AI_DEBUG_MODE:
-                safe_print(f"\n--- [AI DEBUG] 第{attempt + 1}次尝试 ---")
+                safe_print(f"\n--- [AI DEBUG] {profile_label} 第{attempt + 1}次尝试 ---")
                 safe_print("--- RAW AI RESPONSE ---")
                 safe_print(ai_response_content)
                 safe_print("---------------------\n")
@@ -430,21 +529,23 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
 
                 # 验证响应格式
                 if validate_ai_response_format(parsed_response):
-                    safe_print(f"   [AI分析] 第{attempt + 1}次尝试成功，响应格式验证通过")
+                    safe_print(
+                        f"   [AI分析] 模型[{profile_label}] 第{attempt + 1}次尝试成功，响应格式验证通过"
+                    )
                     return parsed_response
-                safe_print(f"   [AI分析] 第{attempt + 1}次尝试格式验证失败")
+                safe_print(f"   [AI分析] {profile_label} 第{attempt + 1}次尝试格式验证失败")
                 if attempt < max_retries - 1:
                     safe_print(f"   [AI分析] 准备第{attempt + 2}次重试...")
                     continue
                 raise ValueError("AI响应格式缺少必需字段或字段类型不正确。")
             except json.JSONDecodeError as e:
-                safe_print(f"   [AI分析] 第{attempt + 1}次尝试JSON解析失败: {e}")
+                safe_print(f"   [AI分析] {profile_label} 第{attempt + 1}次尝试JSON解析失败: {e}")
                 if attempt < max_retries - 1:
                     safe_print(f"   [AI分析] 准备第{attempt + 2}次重试...")
                     continue
                 raise e
             except EmptyAIResponseError as e:
-                safe_print(f"   [AI分析] 第{attempt + 1}次尝试返回空响应: {e}")
+                safe_print(f"   [AI分析] {profile_label} 第{attempt + 1}次尝试返回空响应: {e}")
                 if attempt < max_retries - 1:
                     safe_print(f"   [AI分析] 准备第{attempt + 2}次重试...")
                     continue
@@ -475,11 +576,11 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                     "   [AI分析] 当前模型不支持 temperature 参数，后续重试将自动禁用该参数。"
                 )
             if AI_DEBUG_MODE:
-                safe_print(f"\n--- [AI DEBUG] 第{attempt + 1}次尝试 EXCEPTION ---")
+                safe_print(f"\n--- [AI DEBUG] {profile_label} 第{attempt + 1}次尝试 EXCEPTION ---")
                 safe_print(repr(e))
                 safe_print(traceback.format_exc())
                 safe_print("-------------------------------------\n")
-            safe_print(f"   [AI分析] 第{attempt + 1}次尝试AI调用失败: {e}")
+            safe_print(f"   [AI分析] {profile_label} 第{attempt + 1}次尝试AI调用失败: {e}")
             if attempt < max_retries - 1:
                 safe_print(f"   [AI分析] 准备第{attempt + 2}次重试...")
                 continue

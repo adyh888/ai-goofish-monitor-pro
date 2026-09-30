@@ -38,6 +38,33 @@ def bootstrap_sqlite_storage(
             _import_tasks_if_needed(conn, legacy_config_file)
             _import_results_if_needed(conn, legacy_result_dir)
             _import_price_snapshots_if_needed(conn, legacy_price_history_dir)
+            _import_env_ai_profile_if_needed(conn)
+
+
+def _import_env_ai_profile_if_needed(conn) -> None:
+    """多模型升级迁移：把 .env 里的单模型配置导入为第一个 AI 模型配置（仅执行一次）。"""
+    if _bootstrap_completed(conn, "bootstrap:env_ai_profile"):
+        return
+
+    import os
+    from urllib.parse import urlparse
+
+    base_url = (os.getenv("OPENAI_BASE_URL") or "").strip()
+    model_name = (os.getenv("OPENAI_MODEL_NAME") or "").strip()
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    proxy_url = (os.getenv("PROXY_URL") or "").strip()
+    if base_url and model_name and _table_is_empty(conn, "ai_profiles"):
+        host = urlparse(base_url).netloc or base_url
+        conn.execute(
+            """
+            INSERT INTO ai_profiles
+                (name, base_url, api_key, model_name, proxy_url, enabled, is_active, sort_order)
+            VALUES (?, ?, ?, ?, ?, 1, 1, 0)
+            """,
+            (f"{model_name}@{host}", base_url, api_key, model_name, proxy_url),
+        )
+    _mark_bootstrap_completed(conn, "bootstrap:env_ai_profile")
+    conn.commit()
 
 
 def _table_is_empty(conn, table_name: str) -> bool:

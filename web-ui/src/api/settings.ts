@@ -163,6 +163,77 @@ export async function fetchAiModels(settings: AiSettings): Promise<{ success: bo
   })
 }
 
+export interface AiProfile {
+  id: number
+  name: string
+  base_url: string
+  model_name: string
+  proxy_url: string
+  enabled: boolean
+  is_active: boolean
+  sort_order: number
+  has_api_key: boolean
+  api_key_hint: string
+}
+
+export interface AiProfilePayload {
+  name?: string
+  base_url?: string
+  api_key?: string
+  model_name?: string
+  proxy_url?: string
+  enabled?: boolean
+}
+
+export async function getAiProfiles(): Promise<AiProfile[]> {
+  const result = await http('/api/settings/ai/profiles')
+  return result.profiles
+}
+
+export async function createAiProfile(payload: AiProfilePayload): Promise<{ message: string }> {
+  return await http('/api/settings/ai/profiles', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+}
+
+export async function updateAiProfile(id: number, payload: AiProfilePayload): Promise<{ message: string }> {
+  return await http(`/api/settings/ai/profiles/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+}
+
+export async function deleteAiProfile(id: number): Promise<{ message: string }> {
+  return await http(`/api/settings/ai/profiles/${id}`, { method: 'DELETE' })
+}
+
+export async function activateAiProfile(id: number): Promise<{ message: string }> {
+  return await http(`/api/settings/ai/profiles/${id}/activate`, { method: 'POST' })
+}
+
+export async function toggleAiProfile(id: number, enabled: boolean): Promise<{ message: string }> {
+  return await http(`/api/settings/ai/profiles/${id}/enabled`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled })
+  })
+}
+
+export async function moveAiProfile(id: number, direction: 'up' | 'down'): Promise<{ message: string }> {
+  return await http(`/api/settings/ai/profiles/${id}/move`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ direction })
+  })
+}
+
+export async function testAiProfile(id: number): Promise<{ success: boolean; message: string; response?: string }> {
+  return await http(`/api/settings/ai/profiles/${id}/test`, { method: 'POST' })
+}
+
 export async function getSystemStatus(): Promise<SystemStatus> {
   return await http('/api/settings/status')
 }
