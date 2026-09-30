@@ -237,10 +237,12 @@ def encode_image_to_base64(image_path):
         return None
 
 
+DEFAULT_PROMPT_VERSION = "EagleEye-V6.4"
+
+
 def validate_ai_response_format(parsed_response):
     """验证AI响应的格式是否符合预期结构"""
     required_fields = [
-        "prompt_version",
         "is_recommended",
         "reason",
         "risk_tags",
@@ -252,6 +254,10 @@ def validate_ai_response_format(parsed_response):
         if field not in parsed_response:
             safe_print(f"   [AI分析] 警告：响应缺少必需字段 '{field}'")
             return False
+
+    # prompt_version 是程序元数据，部分模型不回显；缺失时补齐而不是判失败
+    if not parsed_response.get("prompt_version"):
+        parsed_response["prompt_version"] = DEFAULT_PROMPT_VERSION
 
     # 检查criteria_analysis是否为字典且不为空
     criteria_analysis = parsed_response.get("criteria_analysis", {})
@@ -385,7 +391,9 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=current_temperature,
-                max_output_tokens=4000,
+                # 8192：推理型模型即使关闭思考失败时，思考文本也会挤占输出上限，
+                # 4000 会导致最终 JSON 被截断
+                max_output_tokens=8192,
                 enable_json_output=use_response_format,
             )
             if not use_temperature:

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useSettings } from '@/composables/useSettings'
@@ -13,6 +13,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { toast } from '@/components/ui/toast'
 import { getPromptContent, listPrompts, updatePrompt } from '@/api/prompts'
+import { fetchAiModels } from '@/api/settings'
+import { Download } from 'lucide-vue-next'
 import NotificationSettingsPanel from '@/components/settings/NotificationSettingsPanel.vue'
 import RotationSettingsPanel from '@/components/settings/RotationSettingsPanel.vue'
 const { t } = useI18n()
@@ -37,6 +39,58 @@ const {
 const activeTab = ref('ai')
 const route = useRoute()
 const validTabs = new Set(['notifications', 'ai', 'rotation', 'status', 'prompts'])
+
+// 按 API 服务商给出模型候选，用户可自由输入覆盖
+const MODEL_SUGGESTIONS: Array<{ match: RegExp; models: string[] }> = [
+  { match: /deepseek/i, models: ['deepseek-chat', 'deepseek-reasoner'] },
+  { match: /openai\.com/i, models: ['gpt-4o', 'gpt-4o-mini'] },
+  { match: /moonshot/i, models: ['moonshot-v1-8k-vision-preview', 'moonshot-v1-32k-vision-preview'] },
+  { match: /dashscope|aliyun/i, models: ['qwen-vl-plus', 'qwen2.5-vl-72b-instruct'] },
+  { match: /bigmodel\.cn|zhipu/i, models: ['glm-4v-flash', 'glm-4v-plus'] },
+]
+
+const availableModels = ref<string[]>([])
+const isLoadingModels = ref(false)
+
+// 服务商真实列表与静态候选合并去重（如 deepseek-chat 可用但不在 /models 返回里），
+// 用户仍可自由输入覆盖
+const modelSuggestions = computed(() => {
+  const base = aiSettings.value.OPENAI_BASE_URL || ''
+  const hit = MODEL_SUGGESTIONS.find((p) => p.match.test(base))
+  const merged = [...availableModels.value, ...(hit ? hit.models : [])]
+  return [...new Set(merged)]
+})
+
+async function handleFetchModels() {
+  isLoadingModels.value = true
+  try {
+    const result = await fetchAiModels({
+      OPENAI_BASE_URL: aiSettings.value.OPENAI_BASE_URL,
+      OPENAI_API_KEY: aiSettings.value.OPENAI_API_KEY,
+      PROXY_URL: aiSettings.value.PROXY_URL,
+    })
+    if (result.success && result.models.length) {
+      availableModels.value = result.models
+      notifySuccess(t('settings.ai.fetchModelsSuccess', { count: result.models.length }))
+    } else {
+      notifyError(t('settings.ai.fetchModelsFailed'), result.message || undefined)
+    }
+  } catch (e) {
+    notifyError(t('settings.ai.fetchModelsFailed'), (e as Error).message)
+  } finally {
+    isLoadingModels.value = false
+  }
+}
+
+function selectModel(model: string) {
+  aiSettings.value.OPENAI_MODEL_NAME = model
+}
+
+// 推理/思考模型会输出思考过程，token 用量高且易解析失败（如 deepseek-reasoner/flash、QwQ、o 系列等）
+const REASONING_MODEL_RE = /deepseek-(reasoner|flash|r1)|qwq|thinking|^o[134]([-_.]|$)/i
+const isLikelyReasoningModel = computed(() =>
+  REASONING_MODEL_RE.test((aiSettings.value.OPENAI_MODEL_NAME || '').trim())
+)
 
 const promptFiles = ref<string[]>([])
 const selectedPrompt = ref<string | null>(null)
@@ -220,7 +274,47 @@ watch(selectedPrompt, async (value) => {
             </div>
             <div class="grid gap-2">
               <Label>{{ t('settings.ai.modelName') }}</Label>
-              <Input v-model="aiSettings.OPENAI_MODEL_NAME" placeholder="gpt-3.5-turbo" />
+              <Input
+                v-model="aiSettings.OPENAI_MODEL_NAME"
+                :placeholder="t('settings.ai.modelNamePlaceholder')"
+                list="ai-model-suggestions"
+                autocomplete="off"
+              />
+              <datalist id="ai-model-suggestions">
+                <option v-for="m in modelSuggestions" :key="m" :value="m" />
+              </datalist>
+              <p v-if="isLikelyReasoningModel" class="text-xs font-medium text-amber-600">
+                {{ t('settings.ai.modelNameReasoningWarning') }}
+              </p>
+              <p class="text-xs text-gray-500">{{ t('settings.ai.modelNameHint') }}</p>
+              <div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  :disabled="isLoadingModels"
+                  @click="handleFetchModels"
+                >
+                  <Download class="mr-1 h-3.5 w-3.5" />
+                  {{ isLoadingModels ? t('settings.ai.fetchModelsLoading') : t('settings.ai.fetchModels') }}
+                </Button>
+              </div>
+              <div v-if="availableModels.length" class="grid gap-1">
+                <p class="text-xs text-gray-500">{{ t('settings.ai.pickModelHint') }}</p>
+                <div class="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto rounded-md border bg-slate-50 p-2">
+                  <button
+                    v-for="m in availableModels"
+                    :key="m"
+                    type="button"
+                    class="rounded-full border bg-white px-2.5 py-0.5 text-xs"
+                    :class="aiSettings.OPENAI_MODEL_NAME === m
+                      ? 'border-blue-500 font-medium text-blue-600'
+                      : 'border-gray-200 text-gray-600 hover:border-blue-400 hover:text-blue-600'"
+                    @click="selectModel(m)"
+                  >
+                    {{ m }}
+                  </button>
+                </div>
+              </div>
             </div>
             <div class="grid gap-2">
               <Label>{{ t('settings.ai.proxy') }}</Label>

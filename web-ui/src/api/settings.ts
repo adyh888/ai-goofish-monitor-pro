@@ -155,6 +155,14 @@ export async function testAiSettings(settings: AiSettings): Promise<{ success: b
   })
 }
 
+export async function fetchAiModels(settings: AiSettings): Promise<{ success: boolean; models: string[]; message: string }> {
+  return await http('/api/settings/ai/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings)
+  })
+}
+
 export async function getSystemStatus(): Promise<SystemStatus> {
   return await http('/api/settings/status')
 }

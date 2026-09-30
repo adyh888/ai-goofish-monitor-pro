@@ -329,10 +329,16 @@ def _build_context_overrides(snapshot: dict) -> dict:
 def _build_extra_headers(raw_headers: Optional[dict]) -> dict:
     if not raw_headers:
         return {}
-    excluded = {"cookie", "content-length"}
+    excluded = {"cookie", "content-length", "accept-encoding", "connection",
+                "host", "origin", "referer"}
+    # sec-fetch-* / sec-ch-ua* 是浏览器保留头，覆盖会导致所有子资源请求
+    # 被拒绝（ERR_INVALID_ARGUMENT）或与真实指纹不一致
+    excluded_prefixes = ("sec-fetch-", "sec-ch-ua")
     headers = {}
     for key, value in raw_headers.items():
         if not key or key.lower() in excluded or value is None:
+            continue
+        if key.lower().startswith(excluded_prefixes):
             continue
         headers[key] = value
     return headers

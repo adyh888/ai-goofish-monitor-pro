@@ -61,7 +61,8 @@ def test_process_service_marks_task_stopped_when_process_exits(monkeypatch, tmp_
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
         started = await service.start_task(0, "task-a")
-        assert started is True
+        assert started.started is True
+        assert started.status == "started"
         assert events == [("started", 0)]
         assert service.is_running(0) is True
 

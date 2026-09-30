@@ -30,6 +30,7 @@ def build_analysis_text_prompt(
 
     {prompt_text}
     {value_note}
+    重要：不要输出任何思考过程、计划或解释性文字，直接输出最终的分析结果 JSON。
     {note}"""
 
 

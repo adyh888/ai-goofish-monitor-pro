@@ -249,6 +249,16 @@ const zhCN = {
       keyConfigured: '已配置，为安全起见不回显。',
       keyMissing: '未配置，为安全起见不回显。',
       modelName: '模型名称',
+      modelNamePlaceholder: '如 deepseek-chat',
+      modelNameHint:
+        '推荐 deepseek-chat 等非推理模型：实测同一分析任务 deepseek-chat 约 600 token，deepseek-flash 需 5700+ token。推理/混合模型会把思考过程写进输出，既成倍增加用量，也容易导致解析失败触发重试。',
+      modelNameReasoningWarning:
+        '⚠️ 当前模型疑似推理/思考模型：token 用量高、易解析失败，建议改用 deepseek-chat 等非推理模型。',
+      fetchModels: '获取模型列表',
+      fetchModelsLoading: '获取中...',
+      fetchModelsSuccess: '已获取 {count} 个可用模型，点击即可选用',
+      fetchModelsFailed: '获取模型列表失败',
+      pickModelHint: '点击下方模型直接选用：',
       proxy: '代理地址 (可选)',
       loading: '正在加载 AI 配置...',
       testConnection: '测试连接',

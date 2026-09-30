@@ -2,7 +2,14 @@
 AI 响应解析工具
 """
 import json
+import re
 from typing import Any
+
+# 推理型模型可能把 <think>...</think> 思考块泄漏到返回内容中
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+# 判断一个 JSON 对象是否像分析结果（而非提示词里引用的示例）
+_RESULT_MARKER_KEYS = ("is_recommended", "criteria_analysis", "risk_tags", "prompt_version")
 
 
 class EmptyAIResponseError(ValueError):
@@ -46,7 +53,7 @@ def extract_ai_response_content(response: Any) -> str:
 
 def parse_ai_response_json(content: str) -> dict:
     """解析 AI 文本响应中的 JSON。"""
-    cleaned = _strip_code_fences(content)
+    cleaned = _strip_code_fences(_THINK_BLOCK_RE.sub("", content))
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
@@ -103,16 +110,25 @@ def _extract_first_json_value(
 ):
     decoder = json.JSONDecoder()
     last_error: json.JSONDecodeError | None = None
+    first_parsed: Any = None
 
     for start_index, char in enumerate(content):
         if char not in "{[":
             continue
         try:
             parsed, _ = decoder.raw_decode(content[start_index:])
-            return parsed
         except json.JSONDecodeError as exc:
             last_error = exc
+            continue
+        if first_parsed is None:
+            first_parsed = parsed
+        # 思考过程泄漏时，正文里可能夹带多个 JSON；结果对象必然包含特征字段，
+        # 取第一个命中的，与"多对象拼接取第一个"的既有契约一致
+        if isinstance(parsed, dict) and any(k in parsed for k in _RESULT_MARKER_KEYS):
+            return parsed
 
+    if first_parsed is not None:
+        return first_parsed
     if last_error is not None:
         raise last_error
     raise fallback_error

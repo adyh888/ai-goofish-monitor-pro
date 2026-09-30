@@ -283,6 +283,49 @@ async def update_ai_settings(settings: AISettingsModel):
     return {"message": "AI设置已成功更新"}
 
 
+@router.post("/ai/models")
+async def list_ai_models(settings: dict):
+    """从服务商拉取可用模型列表（OpenAI 兼容 /models 接口）"""
+    try:
+        from openai import OpenAI
+        import httpx
+
+        base_url = (settings.get("OPENAI_BASE_URL") or "").strip()
+        if not base_url:
+            return {"success": False, "models": [], "message": "请先填写 API Base URL"}
+
+        stored_api_key = env_manager.get_value("OPENAI_API_KEY", "")
+        submitted_api_key = settings.get("OPENAI_API_KEY", "")
+        api_key = submitted_api_key or stored_api_key or "no-key-required"
+
+        client_params = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "timeout": httpx.Timeout(30.0),
+        }
+
+        proxy_url = settings.get("PROXY_URL", "")
+        if proxy_url:
+            client_params["http_client"] = httpx.Client(proxy=proxy_url)
+
+        client = OpenAI(**client_params)
+        models = client.models.list()
+        model_ids = sorted({m.id for m in models.data if getattr(m, "id", None)})
+        if not model_ids:
+            return {
+                "success": False,
+                "models": [],
+                "message": "服务商未返回任何模型，可能不支持 /models 接口，请手动填写模型名称",
+            }
+        return {"success": True, "models": model_ids, "message": ""}
+    except Exception as exc:
+        return {
+            "success": False,
+            "models": [],
+            "message": f"获取模型列表失败: {exc}",
+        }
+
+
 @router.post("/ai/test")
 async def test_ai_settings(settings: dict):
     """测试AI模型设置是否有效"""

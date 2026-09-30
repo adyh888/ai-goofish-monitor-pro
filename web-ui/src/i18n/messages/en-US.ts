@@ -249,6 +249,16 @@ const enUS = {
       keyConfigured: 'Configured and intentionally not echoed back.',
       keyMissing: 'Not configured and intentionally not echoed back.',
       modelName: 'Model Name',
+      modelNamePlaceholder: 'e.g. deepseek-chat',
+      modelNameHint:
+        'Prefer non-reasoning models like deepseek-chat: in real tests the same analysis task costs ~600 tokens with deepseek-chat vs 5700+ with deepseek-flash. Reasoning/hybrid models emit chain-of-thought, inflating usage and often causing parse failures with retries.',
+      modelNameReasoningWarning:
+        '⚠️ This looks like a reasoning/thinking model: high token usage and frequent parse failures. Consider switching to a non-reasoning model such as deepseek-chat.',
+      fetchModels: 'Fetch model list',
+      fetchModelsLoading: 'Fetching...',
+      fetchModelsSuccess: 'Fetched {count} available models, click one to use it',
+      fetchModelsFailed: 'Failed to fetch model list',
+      pickModelHint: 'Click a model below to use it:',
       proxy: 'Proxy URL (optional)',
       loading: 'Loading AI settings...',
       testConnection: 'Test Connection',
