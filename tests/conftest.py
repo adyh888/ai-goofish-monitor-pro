@@ -16,6 +16,7 @@ sys.path.insert(0, str(repo_root))
 
 from src.api import dependencies as deps
 from src.api.routes import tasks
+from src.infrastructure.persistence.user_repository import User
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.services.process_service import StartTaskOutcome
 from src.services.task_service import TaskService
@@ -109,6 +110,20 @@ class FakeSchedulerService:
         return self.next_run_times.get(task_id)
 
 
+def _make_test_admin() -> User:
+    """测试用管理员上下文（不触库）。"""
+    return User(
+        id=1,
+        username="test-admin",
+        password_hash="x",
+        role="admin",
+        status="active",
+        expired_at=None,
+        created_at="2026-01-01T00:00:00",
+        last_login_at=None,
+    )
+
+
 @pytest.fixture()
 def api_context(tmp_path):
     config_file = tmp_path / "config.json"
@@ -149,10 +164,14 @@ def api_context(tmp_path):
 
     process_service.set_lifecycle_hooks(on_started=mark_started, on_stopped=mark_stopped)
 
+    def override_get_current_user():
+        return _make_test_admin()
+
     app.dependency_overrides[deps.get_task_service] = override_get_task_service
     app.dependency_overrides[deps.get_process_service] = override_get_process_service
     app.dependency_overrides[deps.get_scheduler_service] = override_get_scheduler_service
     app.dependency_overrides[deps.get_task_generation_service] = override_get_task_generation_service
+    app.dependency_overrides[deps.get_current_user] = override_get_current_user
 
     return {
         "app": app,

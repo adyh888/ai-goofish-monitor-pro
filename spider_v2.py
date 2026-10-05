@@ -30,8 +30,13 @@ async def main():
     )
     parser.add_argument("--debug-limit", type=int, default=0, help="调试模式：每个任务仅处理前 N 个新商品（0 表示无限制）")
     parser.add_argument("--config", type=str, help="指定任务配置文件路径（传入时优先读取 JSON）")
+    parser.add_argument("--task-id", type=int, default=0, help="任务 ID（由调度器/启动器注入，优先于任务名精确匹配，杜绝同名任务串配置）")
     parser.add_argument("--task-name", type=str, help="只运行指定名称的单个任务 (用于定时任务调度)")
+    parser.add_argument("--user-id", type=int, default=0, help="任务归属用户 ID（SaaS 多用户隔离，由调度器注入）")
     args = parser.parse_args()
+
+    if args.user_id and args.user_id > 0:
+        os.environ["SPIDER_USER_ID"] = str(args.user_id)
 
     if args.config:
         if not os.path.exists(args.config):
@@ -43,7 +48,10 @@ async def main():
             sys.exit(f"错误: 读取或解析配置文件 '{args.config}' 失败: {e}")
     else:
         repository = SqliteTaskRepository()
-        tasks = await repository.find_all()
+        # 多用户隔离：指定 --user-id 时只加载该用户的任务，
+        # 避免按名匹配时拿到其他用户同名任务的配置
+        user_scope = args.user_id if args.user_id and args.user_id > 0 else None
+        tasks = await repository.find_all(user_scope)
         tasks_config = [task.dict() for task in tasks]
 
     def normalize_keywords(value):
@@ -152,13 +160,26 @@ async def main():
     if args.debug_limit > 0:
         print(f"** 调试模式已激活，每个任务最多处理 {args.debug_limit} 个新商品 **")
     
-    if args.task_name:
+    if args.task_id and not args.config:
+        print(f"** 定时任务模式：按任务 ID {args.task_id} 精确执行 **")
+    elif args.task_name:
         print(f"** 定时任务模式：只执行任务 '{args.task_name}' **")
 
     print("--------------------")
 
     active_task_configs = []
-    if args.task_name:
+    if args.task_id and not args.config:
+        # 调度/手动启动走 --task-id：按 ID 精确匹配，同名任务不再互相串配置
+        task_found = next((task for task in tasks_config if task.get('id') == args.task_id), None)
+        if task_found is None:
+            print(f"错误：未找到 ID 为 {args.task_id} 的任务（或该任务不属于用户 {args.user_id or '未知'}）。")
+            return
+        if task_found.get("enabled", False):
+            active_task_configs.append(task_found)
+        else:
+            print(f"任务 '{task_found.get('task_name')}' (ID: {args.task_id}) 已被禁用，跳过执行。")
+            return
+    elif args.task_name:
         # 如果指定了任务名称，只查找该任务
         task_found = next((task for task in tasks_config if task.get('task_name') == args.task_name), None)
         if task_found:

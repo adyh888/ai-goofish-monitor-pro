@@ -249,29 +249,111 @@ def _build_channel_test_values(
     return values
 
 
-def load_notification_settings() -> NotificationSettings:
-    return _build_notification_settings_model(
-        {
-            "ntfy_topic_url": _normalize_existing_text(env_manager.get_value("NTFY_TOPIC_URL")),
-            "gotify_url": _normalize_existing_text(env_manager.get_value("GOTIFY_URL")),
-            "gotify_token": _normalize_existing_text(env_manager.get_value("GOTIFY_TOKEN")),
-            "bark_url": _normalize_existing_text(env_manager.get_value("BARK_URL")),
-            "wx_bot_url": _normalize_existing_text(env_manager.get_value("WX_BOT_URL")),
-            "telegram_bot_token": _normalize_existing_text(env_manager.get_value("TELEGRAM_BOT_TOKEN")),
-            "telegram_chat_id": _normalize_existing_text(env_manager.get_value("TELEGRAM_CHAT_ID")),
-            "telegram_api_base_url": (
-                _normalize_existing_text(env_manager.get_value("TELEGRAM_API_BASE_URL"))
-                or DEFAULT_TELEGRAM_API_BASE_URL
-            ),
-            "webhook_url": _normalize_existing_text(env_manager.get_value("WEBHOOK_URL")),
-            "webhook_method": _normalize_existing_text(env_manager.get_value("WEBHOOK_METHOD")) or "POST",
-            "webhook_headers": _normalize_existing_text(env_manager.get_value("WEBHOOK_HEADERS")),
-            "webhook_content_type": _normalize_existing_text(env_manager.get_value("WEBHOOK_CONTENT_TYPE")) or "JSON",
-            "webhook_query_parameters": _normalize_existing_text(env_manager.get_value("WEBHOOK_QUERY_PARAMETERS")),
-            "webhook_body": _normalize_existing_text(env_manager.get_value("WEBHOOK_BODY")),
-            "pcurl_to_mobile": _env_bool(env_manager.get_value("PCURL_TO_MOBILE"), True),
-        }
-    )
+def load_notification_settings(user_id: int = 1) -> NotificationSettings:
+    """读取用户的通知配置。
+
+    - 普通用户：读 user_notification_configs（加密 JSON），无记录则返回空配置；
+    - 管理员（user_id=1）：无数据库记录时回退到 .env（历史配置兼容）。
+    """
+    from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
+    from src.infrastructure.persistence.sqlite_connection import sqlite_connection
+    from src.services.secret_box import try_decrypt_text
+
+    bootstrap_sqlite_storage()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            "SELECT config_json FROM user_notification_configs WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if row is not None:
+        raw_json = try_decrypt_text(row["config_json"])
+        if raw_json:
+            try:
+                stored = json.loads(raw_json)
+            except json.JSONDecodeError:
+                stored = {}
+            if isinstance(stored, dict) and stored:
+                base = _default_notification_values(include_env=user_id == 1)
+                base.update(
+                    {k: v for k, v in stored.items() if k in base}
+                )
+                return _build_notification_settings_model(base)
+
+    if user_id == 1:
+        return _build_notification_settings_model(_load_env_notification_values())
+    return _build_notification_settings_model(_default_notification_values(include_env=False))
+
+
+def _default_notification_values(*, include_env: bool) -> dict:
+    """空配置模板；include_env 仅用于管理员回退，避免普通用户读到平台 .env。"""
+    if include_env:
+        return _load_env_notification_values()
+    return {
+        "ntfy_topic_url": None,
+        "gotify_url": None,
+        "gotify_token": None,
+        "bark_url": None,
+        "wx_bot_url": None,
+        "telegram_bot_token": None,
+        "telegram_chat_id": None,
+        "telegram_api_base_url": DEFAULT_TELEGRAM_API_BASE_URL,
+        "webhook_url": None,
+        "webhook_method": "POST",
+        "webhook_headers": None,
+        "webhook_content_type": "JSON",
+        "webhook_query_parameters": None,
+        "webhook_body": None,
+        "pcurl_to_mobile": True,
+    }
+
+
+def _load_env_notification_values() -> dict:
+    return {
+        "ntfy_topic_url": _normalize_existing_text(env_manager.get_value("NTFY_TOPIC_URL")),
+        "gotify_url": _normalize_existing_text(env_manager.get_value("GOTIFY_URL")),
+        "gotify_token": _normalize_existing_text(env_manager.get_value("GOTIFY_TOKEN")),
+        "bark_url": _normalize_existing_text(env_manager.get_value("BARK_URL")),
+        "wx_bot_url": _normalize_existing_text(env_manager.get_value("WX_BOT_URL")),
+        "telegram_bot_token": _normalize_existing_text(env_manager.get_value("TELEGRAM_BOT_TOKEN")),
+        "telegram_chat_id": _normalize_existing_text(env_manager.get_value("TELEGRAM_CHAT_ID")),
+        "telegram_api_base_url": (
+            _normalize_existing_text(env_manager.get_value("TELEGRAM_API_BASE_URL"))
+            or DEFAULT_TELEGRAM_API_BASE_URL
+        ),
+        "webhook_url": _normalize_existing_text(env_manager.get_value("WEBHOOK_URL")),
+        "webhook_method": _normalize_existing_text(env_manager.get_value("WEBHOOK_METHOD")) or "POST",
+        "webhook_headers": _normalize_existing_text(env_manager.get_value("WEBHOOK_HEADERS")),
+        "webhook_content_type": _normalize_existing_text(env_manager.get_value("WEBHOOK_CONTENT_TYPE")) or "JSON",
+        "webhook_query_parameters": _normalize_existing_text(env_manager.get_value("WEBHOOK_QUERY_PARAMETERS")),
+        "webhook_body": _normalize_existing_text(env_manager.get_value("WEBHOOK_BODY")),
+        "pcurl_to_mobile": _env_bool(env_manager.get_value("PCURL_TO_MOBILE"), True),
+    }
+
+
+def save_notification_settings_for_user(user_id: int, settings: NotificationSettings) -> None:
+    """把该用户的通知配置整体加密落库。"""
+    from datetime import datetime
+
+    from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
+    from src.infrastructure.persistence.sqlite_connection import sqlite_connection
+    from src.services.secret_box import encrypt_text
+
+    values = _notification_settings_to_values(settings)
+    payload = json.dumps(values, ensure_ascii=False)
+    bootstrap_sqlite_storage()
+    with sqlite_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_notification_configs (user_id, config_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                config_json = excluded.config_json,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, encrypt_text(payload), datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
 
 
 def _build_notification_settings_model(values: dict) -> NotificationSettings:

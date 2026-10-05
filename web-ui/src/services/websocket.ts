@@ -37,7 +37,8 @@ class WebSocketService {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host; // This includes port if present
 
-    const url = `${protocol}//${host}/ws`;
+    const token = localStorage.getItem('auth_token') || '';
+    const url = `${protocol}//${host}/ws?token=${encodeURIComponent(token)}`;
 
     console.log(`Connecting to WebSocket at ${url}`);
     this.ws = new WebSocket(url);
@@ -66,8 +67,8 @@ class WebSocketService {
         this.isConnected = false;
         this.emit('disconnected', { isConnected: false });
       }
-      // 只有在 shouldConnect 为 true 或已登录时才重连
-      if (this.shouldConnect || localStorage.getItem('auth_logged_in') === 'true') {
+      // 只有在 shouldConnect 为 true 且有 token 时才重连
+      if (this.shouldConnect && localStorage.getItem('auth_token')) {
         setTimeout(() => this.connect(), this.reconnectInterval);
       }
     };

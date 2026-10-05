@@ -4,8 +4,12 @@
 import os
 import json
 import aiofiles
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+from src.api.dependencies import get_current_user
+from src.infrastructure.persistence.user_repository import User
+from src.utils import get_user_state_dir, get_user_state_file
 
 
 router = APIRouter(prefix="/api/login-state", tags=["login-state"])
@@ -19,9 +23,11 @@ class LoginStateUpdate(BaseModel):
 @router.post("", response_model=dict)
 async def update_login_state(
     data: LoginStateUpdate,
+    current_user: User = Depends(get_current_user),
 ):
-    """接收前端发送的登录状态JSON字符串，并保存到 xianyu_state.json"""
-    state_file = "xianyu_state.json"
+    """接收前端发送的登录状态JSON字符串，保存到当前用户的登录态文件。"""
+    os.makedirs(get_user_state_dir(current_user.id), exist_ok=True)
+    state_file = get_user_state_file(current_user.id)
 
     try:
         # 验证是否是有效的JSON
@@ -38,9 +44,9 @@ async def update_login_state(
 
 
 @router.delete("", response_model=dict)
-async def delete_login_state():
-    """删除 xianyu_state.json 文件"""
-    state_file = "xianyu_state.json"
+async def delete_login_state(current_user: User = Depends(get_current_user)):
+    """删除当前用户的登录态文件"""
+    state_file = get_user_state_file(current_user.id)
 
     if os.path.exists(state_file):
         try:

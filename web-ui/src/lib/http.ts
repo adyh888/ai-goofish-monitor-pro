@@ -1,13 +1,17 @@
 import { useAuth } from '@/composables/useAuth'
+import router from '@/router'
 
 interface FetchOptions extends RequestInit {
   params?: Record<string, string | number | boolean | undefined>;
 }
 
 export async function http(url: string, options: FetchOptions = {}) {
-  const { logout } = useAuth()
-  
+  const { token, logout } = useAuth()
+
   const headers = new Headers(options.headers)
+  if (token.value) {
+    headers.set('Authorization', `Bearer ${token.value}`)
+  }
 
   // Handle Query Params
   let fullUrl = url
@@ -32,15 +36,24 @@ export async function http(url: string, options: FetchOptions = {}) {
   const response = await fetch(fullUrl, config)
 
   if (response.status === 401) {
-    // Basic Auth failed or session expired
+    // Token 缺失/过期/账号被禁用
     logout()
-    // Optional: Redirect to login handled by router or state change
-    throw new Error('Unauthorized')
+    throw new Error('登录状态已失效，请重新登录')
   }
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}))
-    throw new Error(errorData.detail || `HTTP error! status: ${response.status}`)
+    const detail = errorData.detail
+    if (response.status === 403 && detail && typeof detail === 'object') {
+      if (detail.code === 'MEMBERSHIP_EXPIRED') {
+        router.push('/activate')
+        throw new Error(detail.message || '会员已过期')
+      }
+      throw new Error(detail.message || '没有访问权限')
+    }
+    const message =
+      typeof detail === 'string' ? detail : `HTTP error! status: ${response.status}`
+    throw new Error(message)
   }
 
   // Handle 204 No Content

@@ -4,28 +4,57 @@ import { useRoute, useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import DashboardTaskSearch from '@/components/layout/DashboardTaskSearch.vue'
 import LocaleToggle from '@/components/layout/LocaleToggle.vue'
-import { 
-  Zap, 
-  Bell, 
-  Search, 
+import {
+  Zap,
+  Bell,
+  Search,
   UserCircle,
   HelpCircle,
-  Menu
+  Menu,
+  LogOut,
+  Ticket,
+  ChevronDown
 } from 'lucide-vue-next'
 import Badge from '@/components/ui/badge/Badge.vue'
 import { useMobileNav } from '@/composables/useMobileNav'
+import { useAuth } from '@/composables/useAuth'
 import { useI18n } from 'vue-i18n'
 
 const router = useRouter()
 const route = useRoute()
 const { toggleMobileNav } = useMobileNav()
 const inactiveSearchValue = ref('')
+const userMenuOpen = ref(false)
 const { t } = useI18n()
+const { user, username, isAdmin, membershipActive, logout } = useAuth()
 
 const isDashboard = computed(() => route.name === 'Dashboard')
 
-function goAccounts() {
-  router.push('/accounts')
+const membershipLabel = computed(() => {
+  if (!user.value) return ''
+  if (isAdmin.value) return t('header.adminBadge')
+  const days = user.value.remaining_days ?? 0
+  if (days <= 0) return t('header.membershipExpired')
+  if (days <= 3) return t('header.membershipExpiring', { days })
+  return t('header.membershipDays', { days })
+})
+
+const membershipTone = computed(() => {
+  if (isAdmin.value) return 'border-primary/20 text-primary bg-primary/5'
+  const days = user.value?.remaining_days ?? 0
+  if (days <= 0) return 'border-red-200 bg-red-50 text-red-600'
+  if (days <= 3) return 'border-amber-200 bg-amber-50 text-amber-600'
+  return 'border-emerald-200 bg-emerald-50 text-emerald-600'
+})
+
+function goActivate() {
+  userMenuOpen.value = false
+  router.push('/activate')
+}
+
+function handleLogout() {
+  userMenuOpen.value = false
+  logout()
 }
 
 function goNotifications() {
@@ -104,20 +133,62 @@ function goPrompts() {
       
       <div class="h-6 w-px bg-slate-200 mx-1 hidden sm:block"></div>
 
-      <Button 
-        variant="ghost" 
-        class="hidden sm:flex items-center gap-2 pl-2 pr-4 rounded-full hover:bg-slate-100 transition-all active:scale-95"
-        :aria-label="t('header.openAccounts')"
-        @click="goAccounts"
-      >
-        <div class="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center overflow-hidden border border-slate-300 shadow-sm">
-           <UserCircle class="w-6 h-6 text-slate-500" />
-        </div>
-        <div class="text-left hidden lg:block">
-           <p class="text-xs font-black text-slate-700 leading-none mb-0.5">Xianyu Admin</p>
-           <p class="text-[10px] text-slate-400 font-medium">{{ t('header.accountManagement') }}</p>
-        </div>
-      </Button>
+      <div class="relative">
+        <Button
+          variant="ghost"
+          class="hidden sm:flex items-center gap-2 pl-2 pr-3 rounded-full hover:bg-slate-100 transition-all active:scale-95"
+          aria-label="user menu"
+          @click="userMenuOpen = !userMenuOpen"
+        >
+          <div class="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center overflow-hidden border border-slate-300 shadow-sm">
+             <UserCircle class="w-6 h-6 text-slate-500" />
+          </div>
+          <div class="text-left hidden lg:block">
+             <p class="text-xs font-black text-slate-700 leading-none mb-0.5">{{ username || '...' }}</p>
+             <p class="text-[10px] font-semibold border rounded-full px-2 py-0.5 inline-block" :class="membershipTone">
+               {{ membershipLabel }}
+             </p>
+          </div>
+          <ChevronDown class="w-3.5 h-3.5 text-slate-400" />
+        </Button>
+        <Badge
+          v-if="!membershipActive"
+          variant="outline"
+          class="sm:hidden border-red-200 bg-red-50 text-red-600 text-[10px]"
+        >
+          {{ t('header.membershipExpired') }}
+        </Badge>
+
+        <div
+          v-if="userMenuOpen"
+          class="absolute right-0 top-12 w-56 rounded-xl border border-slate-200/70 bg-white shadow-xl p-2 z-[120]"
+          @click.stop
+        >
+            <div class="px-3 py-2 border-b border-slate-100">
+              <p class="text-sm font-black text-slate-800">{{ username }}</p>
+              <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">
+                {{ isAdmin ? t('header.adminBadge') : t('header.userBadge') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="w-full flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-primary/5 hover:text-primary"
+              @click="goActivate"
+            >
+              <Ticket class="w-4 h-4" />
+              {{ t('header.activateMembership') }}
+            </button>
+            <button
+              type="button"
+              class="w-full flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-red-50 hover:text-red-500"
+              @click="handleLogout"
+            >
+              <LogOut class="w-4 h-4" />
+              {{ t('header.logout') }}
+            </button>
+          </div>
+      </div>
+      <div v-if="userMenuOpen" class="fixed inset-0 z-[110]" @click="userMenuOpen = false"></div>
 
       <Button
         variant="ghost"

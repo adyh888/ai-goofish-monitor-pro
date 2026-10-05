@@ -74,6 +74,14 @@ class NotificationService:
 
 def build_notification_service(
     settings: NotificationSettings | None = None,
+    user_id: int | None = None,
 ) -> NotificationService:
-    notification_settings = settings or load_notification_settings()
-    return NotificationService(build_notification_clients(notification_settings))
+    """构建通知服务。
+
+    不传 settings 时按 user_id 加载该用户的通知配置（缺省 admin=1）。
+    """
+    if settings is None:
+        from src.services.notification_config_service import load_notification_settings
+
+        settings = load_notification_settings(user_id if user_id is not None else 1)
+    return NotificationService(build_notification_clients(settings))

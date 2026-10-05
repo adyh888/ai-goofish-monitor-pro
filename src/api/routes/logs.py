@@ -6,12 +6,27 @@ from typing import Optional, Tuple, List
 import aiofiles
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
-from src.api.dependencies import get_task_service
+from src.api.dependencies import get_current_user, get_task_service
+from src.infrastructure.persistence.user_repository import User
 from src.services.task_service import TaskService
 from src.utils import resolve_task_log_path
 
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
+
+
+async def _task_for_user_or_none(
+    task_id: int,
+    task_service: TaskService,
+    current_user: User,
+):
+    """校验任务归属：非本人且非管理员返回 None（前端展示为任务不存在）。"""
+    task = await task_service.get_task(task_id)
+    if task is None:
+        return None
+    if not current_user.is_admin and task.user_id != current_user.id:
+        return None
+    return task
 
 
 async def _read_tail_lines(
@@ -57,6 +72,7 @@ async def get_logs(
     from_pos: int = 0,
     task_id: Optional[int] = Query(default=None, ge=0),
     task_service: TaskService = Depends(get_task_service),
+    current_user: User = Depends(get_current_user),
 ):
     """获取日志内容（增量读取）"""
     if task_id is None:
@@ -65,7 +81,7 @@ async def get_logs(
             "new_pos": 0
         })
 
-    task = await task_service.get_task(task_id)
+    task = await _task_for_user_or_none(task_id, task_service, current_user)
     if not task:
         return JSONResponse(status_code=404, content={
             "new_content": "任务不存在或已删除。",
@@ -107,6 +123,7 @@ async def get_logs_tail(
     offset_lines: int = Query(default=0, ge=0),
     limit_lines: int = Query(default=50, ge=1, le=1000),
     task_service: TaskService = Depends(get_task_service),
+    current_user: User = Depends(get_current_user),
 ):
     """获取日志尾部内容（按行分页）"""
     if task_id is None:
@@ -117,7 +134,7 @@ async def get_logs_tail(
             "new_pos": 0
         })
 
-    task = await task_service.get_task(task_id)
+    task = await _task_for_user_or_none(task_id, task_service, current_user)
     if not task:
         return JSONResponse(status_code=404, content={
             "content": "",
@@ -165,12 +182,13 @@ async def get_logs_tail(
 async def clear_logs(
     task_id: Optional[int] = Query(default=None, ge=0),
     task_service: TaskService = Depends(get_task_service),
+    current_user: User = Depends(get_current_user),
 ):
     """清空日志文件"""
     if task_id is None:
         return {"message": "未指定任务，无法清空日志。"}
 
-    task = await task_service.get_task(task_id)
+    task = await _task_for_user_or_none(task_id, task_service, current_user)
     if not task:
         return {"message": "任务不存在或已删除。"}
 

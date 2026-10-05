@@ -12,7 +12,7 @@ from src.keyword_rule_engine import build_search_text, evaluate_keyword_rules
 
 
 SellerLoader = Callable[[str], Awaitable[dict]]
-ImageDownloader = Callable[[str, list[str], str], Awaitable[list[str]]]
+ImageDownloader = Callable[..., Awaitable[list[str]]]
 AIAnalyzer = Callable[[dict, list[str], str], Awaitable[Optional[dict]]]
 Notifier = Callable[[dict, str], Awaitable[None]]
 Saver = Callable[[dict, str], Awaitable[bool]]
@@ -30,6 +30,7 @@ class ItemAnalysisJob:
     seller_id: Optional[str]
     zhima_credit_text: Optional[str]
     registration_duration_text: str
+    task_id: int = 0
 
 
 class ItemAnalysisDispatcher:
@@ -154,6 +155,7 @@ class ItemAnalysisDispatcher:
             item_data["商品ID"],
             image_urls,
             job.task_name,
+            task_id=job.task_id,
         )
 
     def _cleanup_images(self, image_paths: list[str]) -> None:

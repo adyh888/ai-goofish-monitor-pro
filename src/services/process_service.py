@@ -13,13 +13,22 @@ from datetime import datetime
 from typing import Awaitable, Callable, Dict, TextIO
 
 from src.ai_handler import send_ntfy_notification
-from src.config import STATE_FILE
-from src.failure_guard import FailureGuard
-from src.infrastructure.persistence.sqlite_task_repository import find_task_by_name_sync
+from src.failure_guard import FailureGuard, build_task_key
+from src.infrastructure.persistence.sqlite_task_repository import (
+    find_task_by_id_sync,
+    find_task_by_name_sync,
+)
 from src.utils import build_task_log_path
 
 STOP_TIMEOUT_SECONDS = 20
 SPIDER_DEBUG_LIMIT_ENV = "SPIDER_DEBUG_LIMIT"
+
+
+def _global_concurrency_limit() -> int:
+    try:
+        return max(1, int(os.getenv("GLOBAL_SPIDER_CONCURRENCY", "5")))
+    except (TypeError, ValueError):
+        return 5
 LifecycleHook = Callable[[int], Awaitable[None] | None]
 
 
@@ -61,16 +70,45 @@ class ProcessService:
         if asyncio.iscoroutine(result):
             await result
 
-    def _resolve_cookie_path(self, task_name: str) -> str | None:
-        """Best-effort cookie/state path for a task."""
+    def _resolve_cookie_path(self, task_name: str, user_id: int | None = None) -> str | None:
+        """Best-effort cookie/state path for a task（按用户隔离）。"""
         try:
-            task = find_task_by_name_sync(task_name)
+            task = find_task_by_name_sync(task_name, user_id)
             if task and isinstance(task.account_state_file, str) and task.account_state_file.strip():
                 return task.account_state_file.strip()
         except Exception:
             pass
 
-        return STATE_FILE if os.path.exists(STATE_FILE) else None
+        from src.utils import get_user_state_file
+
+        state_file = get_user_state_file(user_id)
+        return state_file if os.path.exists(state_file) else None
+
+    def _resolve_task_owner(self, task_id: int) -> int:
+        """任务归属人（爬虫子进程与用户级配置都以它为准）。"""
+        try:
+            task = find_task_by_id_sync(task_id)
+            if task and task.user_id:
+                return int(task.user_id)
+        except Exception:
+            pass
+        return 1
+
+    def _membership_blocked(self, user_id: int) -> bool:
+        if user_id <= 1:
+            return False  # admin 永不放行阻断
+        try:
+            from src.infrastructure.persistence.user_repository import (
+                get_user_by_id_sync,
+            )
+            from src.services.auth_service import is_membership_active
+
+            user = get_user_by_id_sync(user_id)
+            if user is None or user.status != "active":
+                return True
+            return not is_membership_active(user)
+        except Exception:
+            return False
 
     def is_running(self, task_id: int) -> bool:
         """检查任务是否正在运行"""
@@ -96,13 +134,18 @@ class ProcessService:
         log_file_handle = open(log_file_path, "a", encoding="utf-8")
         return log_file_path, log_file_handle
 
-    def _build_spawn_command(self, task_name: str) -> list[str]:
+    def _build_spawn_command(self, task_id: int, task_name: str, user_id: int = 1) -> list[str]:
         command = [
             sys.executable,
             "-u",
             "spider_v2.py",
+            # --task-id 优先按 ID 精确取配置；--task-name 仅用于日志展示与兼容旧调用
+            "--task-id",
+            str(task_id),
             "--task-name",
             task_name,
+            "--user-id",
+            str(user_id),
         ]
         debug_limit = str(os.getenv(SPIDER_DEBUG_LIMIT_ENV, "")).strip()
         if debug_limit.isdigit() and int(debug_limit) > 0:
@@ -111,20 +154,54 @@ class ProcessService:
 
     async def _spawn_process(
         self,
+        task_id: int,
         task_name: str,
         log_file_handle: TextIO,
+        user_id: int = 1,
     ) -> asyncio.subprocess.Process:
         preexec_fn = os.setsid if sys.platform != "win32" else None
         child_env = os.environ.copy()
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUTF8"] = "1"
+        child_env["SPIDER_USER_ID"] = str(user_id)
+        self._apply_user_env(child_env, user_id)
         return await asyncio.create_subprocess_exec(
-            *self._build_spawn_command(task_name),
+            *self._build_spawn_command(task_id, task_name, user_id),
             stdout=log_file_handle,
             stderr=log_file_handle,
             preexec_fn=preexec_fn,
             env=child_env,
         )
+
+    def _apply_user_env(self, child_env: dict, user_id: int) -> None:
+        """把该用户的轮换/代理配置注入子进程环境（与平台 .env 隔离）。
+
+        代理池策略（混合模式）：用户自有代理优先；未填时按平台开关
+        （PLATFORM_PROXY_POOL_ENABLED，默认开）回落到平台共享池。
+        """
+        try:
+            from src.infrastructure.persistence.user_config_repository import (
+                load_rotation_config_sync,
+            )
+
+            values = load_rotation_config_sync(user_id)
+        except Exception as exc:
+            print(f"[用户环境] 读取用户 #{user_id} 轮换配置失败，沿用平台默认: {exc}")
+            return
+
+        for key, value in values.items():
+            if key == "PROXY_POOL":
+                continue
+            child_env[key] = ("true" if value else "false") if isinstance(value, bool) else str(value)
+
+        user_pool = str(values.get("PROXY_POOL") or "").strip()
+        platform_enabled = os.getenv("PLATFORM_PROXY_POOL_ENABLED", "true").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if user_pool:
+            child_env["PROXY_POOL"] = user_pool
+        elif not platform_enabled:
+            child_env.pop("PROXY_POOL", None)
 
     def _register_runtime(
         self,
@@ -147,12 +224,31 @@ class ProcessService:
             print(f"任务 '{task_name}' (ID: {task_id}) 已在运行中")
             return StartTaskOutcome(False, "already_running", "任务已在运行中")
 
+        user_id = self._resolve_task_owner(task_id)
+        if self._membership_blocked(user_id):
+            return StartTaskOutcome(
+                False,
+                "membership_expired",
+                "该账号会员已过期，任务已停止调度；激活卡密后将自动恢复。",
+            )
+
+        running_now = sum(
+            1 for process in self.processes.values()
+            if process is not None and process.returncode is None
+        )
+        if running_now >= _global_concurrency_limit():
+            return StartTaskOutcome(
+                False,
+                "global_busy",
+                f"系统繁忙：全局已有 {running_now} 个任务在运行（上限 {_global_concurrency_limit()}），请稍后再试。",
+            )
+
         decision = self.failure_guard.should_skip_start(
-            task_name,
-            cookie_path=self._resolve_cookie_path(task_name),
+            build_task_key(user_id, task_name),
+            cookie_path=self._resolve_cookie_path(task_name, user_id),
         )
         if decision.skip:
-            await self._notify_skip(task_name, decision)
+            await self._notify_skip(task_name, decision, user_id)
             paused_until = (
                 decision.paused_until.strftime("%Y-%m-%d %H:%M")
                 if decision.paused_until
@@ -170,7 +266,7 @@ class ProcessService:
         log_file_handle = None
         try:
             log_file_path, log_file_handle = self._open_log_file(task_id, task_name)
-            process = await self._spawn_process(task_name, log_file_handle)
+            process = await self._spawn_process(task_id, task_name, log_file_handle, user_id)
         except Exception as exc:
             self._close_log_handle(log_file_handle)
             print(f"启动任务 '{task_name}' 失败: {exc}")
@@ -181,7 +277,7 @@ class ProcessService:
         await self._invoke_hook(self._on_started, task_id)
         return StartTaskOutcome(True, "started")
 
-    async def _notify_skip(self, task_name: str, decision) -> None:
+    async def _notify_skip(self, task_name: str, decision, user_id: int = 1) -> None:
         print(
             f"[FailureGuard] 跳过启动任务 '{task_name}'，已暂停重试 "
             f"(连续失败 {decision.consecutive_failures}/{self.failure_guard.threshold})"
@@ -200,6 +296,7 @@ class ProcessService:
                 f"连续失败: {decision.consecutive_failures}/{self.failure_guard.threshold}\n"
                 f"暂停到: {decision.paused_until.strftime('%Y-%m-%d %H:%M:%S') if decision.paused_until else 'N/A'}\n"
                 "修复方法: 更新登录态/cookies文件后会自动恢复。",
+                user_id=user_id,
             )
         except Exception as exc:
             print(f"发送任务暂停通知失败: {exc}")

@@ -3,6 +3,7 @@ import pytest
 from src.infrastructure.persistence.ai_profile_repository import (
     create_profile_sync,
     delete_profile_sync,
+    get_profile_sync,
     list_enabled_profiles_active_first_sync,
     list_profiles_sync,
     move_profile_sync,
@@ -94,3 +95,22 @@ def test_update_keeps_api_key_when_not_provided(profile_db):
 
     assert updated.name == "A2"
     assert updated.api_key == "sk-secret"
+
+
+def test_profile_roundtrip_keeps_user_id(profile_db):
+    """回归：AiProfile 必须带 user_id，否则归属校验路由会 500。"""
+    created = create_profile_sync(
+        name="会员模型",
+        base_url="https://api.example.com",
+        model_name="model-a",
+        api_key="sk-a",
+        user_id=7,
+    )
+    assert created.user_id == 7
+
+    fetched = get_profile_sync(created.id)
+    assert fetched is not None
+    assert fetched.user_id == 7
+
+    owned = list_profiles_sync(7)
+    assert [p.id for p in owned] == [created.id]

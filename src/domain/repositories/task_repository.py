@@ -13,8 +13,8 @@ class TaskRepository(ABC):
     """任务仓储接口"""
 
     @abstractmethod
-    async def find_all(self) -> List[Task]:
-        """获取所有任务"""
+    async def find_all(self, user_id: int | None = None) -> List[Task]:
+        """获取所有任务；user_id 为 None 时返回全部（管理员视角）"""
         pass
 
     @abstractmethod

@@ -143,6 +143,12 @@ def _atomic_write_json(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def build_task_key(user_id: int | None, task_name: str) -> str:
+    """多用户隔离的守卫键：不同用户的同名任务互不影响。"""
+    scope = user_id if user_id and int(user_id) > 0 else 1
+    return f"u{int(scope)}:{task_name}"
+
+
 @dataclass(frozen=True)
 class SkipDecision:
     skip: bool

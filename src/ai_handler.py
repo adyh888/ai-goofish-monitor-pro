@@ -47,7 +47,12 @@ from src.services.ai_request_compat import (
     remove_temperature_param,
 )
 from src.services.notification_service import build_notification_service
-from src.utils import convert_goofish_link, retry_on_failure
+from src.utils import (
+    convert_goofish_link,
+    get_spider_user_id,
+    retry_on_failure,
+    sanitize_filename,
+)
 
 
 def _positive_int(value, default: int) -> int:
@@ -55,6 +60,9 @@ def _positive_int(value, default: int) -> int:
         return max(1, int(value))
     except (TypeError, ValueError):
         return default
+
+
+from src.utils import get_spider_user_id  # noqa: E402  (爬虫用户上下文)
 
 
 DEFAULT_IMAGE_DOWNLOAD_CONCURRENCY = max(
@@ -144,13 +152,33 @@ def _build_image_save_path(
     return os.path.join(task_image_dir, file_name)
 
 
-async def download_all_images(product_id, image_urls, task_name="default", concurrency=None):
+def build_task_image_dir(task_name, *, task_id: int | None = None) -> str:
+    """任务图片目录：按 用户+任务 隔离，避免同名任务（跨用户或并发）互相清理。
+
+    爬虫子进程内 user_id 取自 SPIDER_USER_ID 环境变量。
+    """
+    user_id = get_spider_user_id()
+    parts = [f"u{user_id}"]
+    if task_id:
+        parts.append(f"t{int(task_id)}")
+    safe_name = sanitize_filename(task_name)
+    dir_name = f"{TASK_IMAGE_DIR_PREFIX}{'_'.join(parts)}_{safe_name}"
+    return os.path.join(IMAGE_SAVE_DIR, dir_name)
+
+
+async def download_all_images(
+    product_id,
+    image_urls,
+    task_name="default",
+    concurrency=None,
+    task_id=None,
+):
     """异步下载一个商品的所有图片。如果图片已存在则跳过。支持任务隔离。"""
     if not image_urls:
         return []
 
     # 为每个任务创建独立的图片目录
-    task_image_dir = os.path.join(IMAGE_SAVE_DIR, f"{TASK_IMAGE_DIR_PREFIX}{task_name}")
+    task_image_dir = build_task_image_dir(task_name, task_id=task_id)
     os.makedirs(task_image_dir, exist_ok=True)
 
     urls = [url.strip() for url in image_urls if url.strip().startswith('http')]
@@ -196,9 +224,9 @@ async def download_all_images(product_id, image_urls, task_name="default", concu
     return saved_paths
 
 
-def cleanup_task_images(task_name):
-    """清理指定任务的图片目录"""
-    task_image_dir = os.path.join(IMAGE_SAVE_DIR, f"{TASK_IMAGE_DIR_PREFIX}{task_name}")
+def cleanup_task_images(task_name, task_id=None):
+    """清理指定任务的图片目录（目录名含用户与任务 ID，与下载侧一致）。"""
+    task_image_dir = build_task_image_dir(task_name, task_id=task_id)
     if os.path.exists(task_image_dir):
         try:
             shutil.rmtree(task_image_dir)
@@ -283,12 +311,13 @@ def validate_ai_response_format(parsed_response):
 
 
 @retry_on_failure(retries=3, delay=5)
-async def send_ntfy_notification(product_data, reason):
-    """兼容旧调用名，内部统一走 NotificationService。"""
-    service = build_notification_service()
+async def send_ntfy_notification(product_data, reason, user_id=None):
+    """兼容旧调用名，内部统一走 NotificationService（按任务归属人隔离配置）。"""
+    resolved_user_id = user_id if user_id is not None else get_spider_user_id()
+    service = build_notification_service(user_id=resolved_user_id)
     if not service.clients:
         safe_print(
-            "警告：未在 .env 文件中配置任何通知服务，跳过通知。"
+            f"警告：用户 #{resolved_user_id} 未配置任何通知渠道，跳过通知。"
         )
         return {}
 
@@ -302,13 +331,13 @@ async def send_ntfy_notification(product_data, reason):
 
 
 def _load_enabled_profiles():
-    """读取启用的 AI 模型配置（当前模型优先）。失败时返回空列表走 .env 兜底。"""
+    """读取当前任务归属人启用的 AI 模型配置（当前模型优先）。失败时返回空列表走 .env 兜底。"""
     try:
         from src.infrastructure.persistence.ai_profile_repository import (
             list_enabled_profiles_active_first_sync,
         )
 
-        return list_enabled_profiles_active_first_sync()
+        return list_enabled_profiles_active_first_sync(user_id=get_spider_user_id())
     except Exception as e:
         safe_print(f"   [AI分析] 读取多模型配置失败，回退到 .env 单模型配置: {e}")
         return []

@@ -1,13 +1,24 @@
 #!/bin/bash
-# 闲鱼监控系统 - 本地运行脚本
+# 闲鱼监控系统(SaaS 版) - 本地运行/重启脚本
 #
 # 用法:
 #   ./dev.sh            一键启动：后端(后台) + 前端 dev(前台)，Ctrl+C 全部停止
 #   ./dev.sh backend    只启动后端（前台，Ctrl+C 停止）
 #   ./dev.sh frontend   只启动前端 dev（前台，需另开终端先跑 ./dev.sh backend）
 #   ./dev.sh build      构建前端 + 后台启动后端（生产模式，单端口访问，无需 Node 常驻）
-#   ./dev.sh stop       停止脚本启动的后台服务
+#   ./dev.sh restart    重启后端（改后端代码/改 .env 后执行；也会兜底清理游离的旧进程）
+#   ./dev.sh stop       停止后端（含兜底清理端口上手动启动的 src.app 进程）
 #   ./dev.sh status     查看运行状态
+#
+# ── 改动生效速查（重要）──────────────────────────────────────────
+#   改了后端代码 (src/**)   → ./dev.sh restart      后端进程必须重启才生效
+#   改了 .env               → ./dev.sh restart      后端启动时读取
+#   改了前端代码 (web-ui/**)
+#     dev 模式 (./dev.sh all/frontend) → 浏览器自动热更新，无需任何操作
+#     生产模式 (访问 SERVER_PORT 单端口) → ./dev.sh build 重新构建即可，
+#       dist 由后端每次请求时直接读取，【后端无需重启】
+#   前后端都要重启(开发模式) → ./dev.sh all 的终端 Ctrl+C 全停后重新 ./dev.sh all
+# ────────────────────────────────────────────────────────────────
 
 set -e
 
@@ -73,6 +84,19 @@ stop_backend() {
         kill "$pid" 2>/dev/null && echo -e "${GREEN}🛑 已停止后端${NC} (PID $pid)"
     fi
     rm -f "$BACKEND_PID_FILE"
+
+    # 兜底：清理手动 nohup 启动、未写入 pid 文件的 src.app 进程，
+    # 避免旧进程占着端口导致"改了代码不生效/405"这类问题
+    if command -v lsof >/dev/null 2>&1; then
+        local stray
+        for stray in $(lsof -tiTCP:"$SERVER_PORT" -sTCP:LISTEN 2>/dev/null); do
+            if ps -p "$stray" -o command= 2>/dev/null | grep -q "src.app"; then
+                kill "$stray" 2>/dev/null \
+                    && echo -e "${GREEN}🛑 已清理游离后端进程${NC} (PID $stray)"
+            fi
+        done
+    fi
+    sleep 1
 }
 
 case "${1:-all}" in
@@ -124,6 +148,12 @@ case "${1:-all}" in
     stop)
         stop_backend
         ;;
+    restart)
+        echo -e "${YELLOW}🔄 重启后端...${NC}"
+        stop_backend
+        start_backend_bg
+        echo -e "${YELLOW}ℹ️  改后端代码/改 .env 用 restart；改前端代码生产模式用 build（后端无需重启）${NC}"
+        ;;
     status)
         if backend_running; then
             echo -e "${GREEN}后端: 运行中${NC} (PID $(cat "$BACKEND_PID_FILE"), http://127.0.0.1:$SERVER_PORT)"
@@ -139,7 +169,8 @@ case "${1:-all}" in
         fi
         ;;
     *)
-        echo "用法: ./dev.sh [all|backend|frontend|build|stop|status]"
+        echo "用法: ./dev.sh [all|backend|frontend|build|restart|stop|status]"
+        echo "常用: 改后端代码 → ./dev.sh restart ；改前端代码(生产) → ./dev.sh build"
         exit 1
         ;;
 esac

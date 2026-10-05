@@ -3,7 +3,25 @@ import json
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from src.api import dependencies as deps
 from src.api.routes import results
+
+from src.infrastructure.persistence.user_repository import User
+
+
+def _fake_admin_user():
+    return User(
+        id=1,
+        username="test-admin",
+        password_hash="x",
+        role="admin",
+        status="active",
+        expired_at=None,
+        created_at="2026-01-01T00:00:00",
+        last_login_at=None,
+    )
+
+
 from src.services.price_history_service import record_market_snapshots
 
 
@@ -54,6 +72,7 @@ def test_results_filter_and_sort_for_keyword_recommendations(tmp_path, monkeypat
 
     app = FastAPI()
     app.include_router(results.router)
+    app.dependency_overrides[deps.get_current_user] = _fake_admin_user
     client = TestClient(app)
 
     resp = client.get(
@@ -174,6 +193,7 @@ def test_results_insights_and_export_csv(tmp_path, monkeypatch):
 
     app = FastAPI()
     app.include_router(results.router)
+    app.dependency_overrides[deps.get_current_user] = _fake_admin_user
     client = TestClient(app)
 
     insights_resp = client.get("/api/results/demo_full_data.jsonl/insights")
@@ -228,6 +248,7 @@ def test_results_export_csv_supports_unicode_filename(tmp_path, monkeypatch):
 
     app = FastAPI()
     app.include_router(results.router)
+    app.dependency_overrides[deps.get_current_user] = _fake_admin_user
     client = TestClient(app)
 
     export_resp = client.get("/api/results/演示_full_data.jsonl/export")
@@ -359,6 +380,7 @@ def test_results_blacklist_rules_hide_items_from_view_and_insights(tmp_path, mon
 
     app = FastAPI()
     app.include_router(results.router)
+    app.dependency_overrides[deps.get_current_user] = _fake_admin_user
     client = TestClient(app)
 
     update_rules_resp = client.put(

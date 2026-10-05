@@ -2,8 +2,9 @@
 新架构的主应用入口
 整合所有路由和服务
 """
+import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -17,11 +18,16 @@ from src.api.routes import (
     login_state,
     websocket,
     accounts,
+    auth as auth_routes,
+    admin as admin_routes,
 )
 from src.api.dependencies import (
     set_process_service,
     set_scheduler_service,
     set_task_generation_service,
+    get_current_user,
+    require_active_member,
+    require_admin,
 )
 from src.services.task_service import TaskService
 from src.services.process_service import ProcessService
@@ -30,6 +36,7 @@ from src.services.task_log_cleanup_service import cleanup_task_logs
 from src.services.task_generation_service import TaskGenerationService
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
+from src.infrastructure.persistence.user_repository import ensure_bootstrap_admin_sync
 from src.infrastructure.config.settings import settings as app_settings
 
 
@@ -48,6 +55,7 @@ async def _sync_task_runtime_status(task_id: int, is_running: bool) -> None:
     await websocket.broadcast_message(
         "task_status_changed",
         {"id": task_id, "is_running": is_running},
+        user_id=task.user_id,
     )
 
 
@@ -62,12 +70,31 @@ set_scheduler_service(scheduler_service)
 set_task_generation_service(task_generation_service)
 
 
+async def _membership_sweep_loop() -> None:
+    """每 60 秒扫描过期会员并暂停其任务（续费后由激活接口立即恢复）。"""
+    import asyncio
+
+    from src.services.membership_service import pause_expired_user_tasks
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            affected = await asyncio.to_thread(pause_expired_user_tasks)
+            if affected:
+                print(f"[会员] 已暂停 {len(affected)} 个过期用户的任务: {affected}")
+                tasks_list = await TaskService(SqliteTaskRepository()).get_all_tasks()
+                await scheduler_service.reload_jobs(tasks_list)
+        except Exception as exc:
+            print(f"[会员] 到期扫描失败: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时
     print("正在启动应用...")
     bootstrap_sqlite_storage()
+    ensure_bootstrap_admin_sync()
     cleanup_task_logs(keep_days=app_settings.task_log_retention_days)
 
     # 重置所有任务状态为停止
@@ -83,12 +110,16 @@ async def lifespan(app: FastAPI):
     await scheduler_service.reload_jobs(tasks_list)
     scheduler_service.start()
 
+    # 会员到期扫描后台任务
+    membership_sweep_task = asyncio.create_task(_membership_sweep_loop())
+
     print("应用启动完成")
 
     yield
 
     # 关闭时
     print("正在关闭应用...")
+    membership_sweep_task.cancel()
     scheduler_service.stop()
     await process_service.stop_all()
     print("应用已关闭")
@@ -103,15 +134,19 @@ app = FastAPI(
 )
 
 # 注册路由
-app.include_router(tasks.router)
-app.include_router(dashboard.router)
-app.include_router(logs.router)
-app.include_router(settings.router)
-app.include_router(prompts.router)
-app.include_router(results.router)
-app.include_router(login_state.router)
+# 会员体系：/api/auth 公开（登录/注册/激活自带限流）；业务路由要求有效会员；
+# 平台级配置（系统设置/账号文件/Prompt 库）在 M3 用户化之前仅管理员可访问。
+app.include_router(auth_routes.router)
+app.include_router(admin_routes.router)
+app.include_router(tasks.router, dependencies=[Depends(require_active_member)])
+app.include_router(dashboard.router, dependencies=[Depends(require_active_member)])
+app.include_router(logs.router, dependencies=[Depends(require_active_member)])
+app.include_router(results.router, dependencies=[Depends(require_active_member)])
+app.include_router(prompts.router, dependencies=[Depends(require_active_member)])
+app.include_router(settings.router, dependencies=[Depends(require_active_member)])
+app.include_router(login_state.router, dependencies=[Depends(require_active_member)])
 app.include_router(websocket.router)
-app.include_router(accounts.router)
+app.include_router(accounts.router, dependencies=[Depends(require_active_member)])
 
 # 挂载静态文件
 # 旧的静态文件目录（用于截图等）
@@ -131,26 +166,9 @@ async def health_check():
     return {"status": "healthy", "message": "服务正常运行"}
 
 
-# 认证状态检查端点
-from fastapi import Request, HTTPException
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-@app.post("/auth/status")
-async def auth_status(payload: LoginRequest):
-    """检查认证状态"""
-    if payload.username == app_settings.web_username and payload.password == app_settings.web_password:
-        return {"authenticated": True, "username": payload.username}
-    raise HTTPException(status_code=401, detail="认证失败")
-
-
 # 主页路由 - 服务 Vue 3 SPA
-from fastapi.responses import JSONResponse
+from fastapi import Request
+from fastapi.responses import FileResponse, JSONResponse
 
 @app.get("/")
 async def read_root(request: Request):

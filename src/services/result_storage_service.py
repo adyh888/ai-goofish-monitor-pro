@@ -50,11 +50,15 @@ def _parse_raw_record(raw_json: str, *, status: str | None = None) -> dict:
 def _build_query_conditions(
     *,
     filename: str,
+    user_id: int | None,
     ai_recommended_only: bool,
     keyword_recommended_only: bool,
 ) -> tuple[str, list]:
     conditions = ["result_filename = ?"]
     params: list = [filename]
+    if user_id is not None:
+        conditions.append("user_id = ?")
+        params.append(user_id)
     if ai_recommended_only:
         conditions.append("is_recommended = 1")
         conditions.append("analysis_source = ?")
@@ -72,15 +76,13 @@ def _sort_expression(sort_by: str, sort_order: str) -> str:
     return f"(CASE WHEN status = 'active' THEN 0 ELSE 1 END), {column} {direction}, id {direction}"
 
 
-def _load_blacklist_keywords_from_conn(conn, filename: str) -> list[str]:
-    row = conn.execute(
-        """
-        SELECT blacklist_keywords_json
-        FROM result_blacklist_rules
-        WHERE result_filename = ?
-        """,
-        (filename,),
-    ).fetchone()
+def _load_blacklist_keywords_from_conn(conn, filename: str, user_id: int | None = None) -> list[str]:
+    query = "SELECT blacklist_keywords_json FROM result_blacklist_rules WHERE result_filename = ?"
+    params: list = [filename]
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    row = conn.execute(query, tuple(params)).fetchone()
     if row is None:
         return []
     try:
@@ -115,6 +117,7 @@ def _load_filtered_records_from_conn(
     conn,
     *,
     filename: str,
+    user_id: int | None,
     ai_recommended_only: bool,
     keyword_recommended_only: bool,
     sort_by: str,
@@ -123,6 +126,7 @@ def _load_filtered_records_from_conn(
 ) -> list[dict]:
     where_clause, params = _build_query_conditions(
         filename=filename,
+        user_id=user_id,
         ai_recommended_only=ai_recommended_only,
         keyword_recommended_only=keyword_recommended_only,
     )
@@ -136,7 +140,7 @@ def _load_filtered_records_from_conn(
         """,
         tuple(params),
     ).fetchall()
-    blacklist_keywords = _load_blacklist_keywords_from_conn(conn, filename)
+    blacklist_keywords = _load_blacklist_keywords_from_conn(conn, filename, user_id)
 
     records: list[dict] = []
     for row in rows:
@@ -147,11 +151,11 @@ def _load_filtered_records_from_conn(
     return records
 
 
-async def save_result_record(record: dict, keyword: str) -> bool:
-    return await asyncio.to_thread(_save_result_record_sync, record, keyword)
+async def save_result_record(record: dict, keyword: str, user_id: int) -> bool:
+    return await asyncio.to_thread(_save_result_record_sync, record, keyword, user_id)
 
 
-def _save_result_record_sync(record: dict, keyword: str) -> bool:
+def _save_result_record_sync(record: dict, keyword: str, user_id: int) -> bool:
     bootstrap_sqlite_storage()
     item = record.get("商品信息", {}) or {}
     analysis = record.get("ai_analysis", {}) or {}
@@ -169,8 +173,8 @@ def _save_result_record_sync(record: dict, keyword: str) -> bool:
             INSERT OR IGNORE INTO result_items (
                 result_filename, keyword, task_name, crawl_time, publish_time, price,
                 price_display, item_id, title, link, link_unique_key, seller_nickname,
-                is_recommended, analysis_source, keyword_hit_count, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_recommended, analysis_source, keyword_hit_count, raw_json, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 build_result_filename(keyword),
@@ -189,66 +193,76 @@ def _save_result_record_sync(record: dict, keyword: str) -> bool:
                 analysis.get("analysis_source"),
                 keyword_hit_count,
                 json.dumps(record, ensure_ascii=False),
+                user_id,
             ),
         )
         conn.commit()
     return True
 
 
-def load_processed_link_keys(keyword: str) -> set[str]:
+def load_processed_link_keys(keyword: str, user_id: int) -> set[str]:
     bootstrap_sqlite_storage()
     filename = build_result_filename(keyword)
     with sqlite_connection() as conn:
         rows = conn.execute(
-            "SELECT link_unique_key FROM result_items WHERE result_filename = ?",
-            (filename,),
+            "SELECT link_unique_key FROM result_items WHERE result_filename = ? AND user_id = ?",
+            (filename, user_id),
         ).fetchall()
     return {str(row["link_unique_key"]) for row in rows if row["link_unique_key"]}
 
 
-async def list_result_filenames() -> list[str]:
-    return await asyncio.to_thread(_list_result_filenames_sync)
+async def list_result_filenames(user_id: int | None = None) -> list[str]:
+    return await asyncio.to_thread(_list_result_filenames_sync, user_id)
 
 
-def _list_result_filenames_sync() -> list[str]:
+def _list_result_filenames_sync(user_id: int | None = None) -> list[str]:
     bootstrap_sqlite_storage()
+    query = """
+        SELECT result_filename, MAX(crawl_time) AS latest_crawl_time
+        FROM result_items
+    """
+    params: list = []
+    if user_id is not None:
+        query += " WHERE user_id = ?"
+        params.append(user_id)
+    query += """
+        GROUP BY result_filename
+        ORDER BY latest_crawl_time DESC, result_filename DESC
+    """
     with sqlite_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT result_filename, MAX(crawl_time) AS latest_crawl_time
-            FROM result_items
-            GROUP BY result_filename
-            ORDER BY latest_crawl_time DESC, result_filename DESC
-            """
-        ).fetchall()
+        rows = conn.execute(query, tuple(params)).fetchall()
     return [str(row["result_filename"]) for row in rows]
 
 
-async def result_file_exists(filename: str) -> bool:
-    return await asyncio.to_thread(_result_file_exists_sync, filename)
+async def result_file_exists(filename: str, user_id: int | None = None) -> bool:
+    return await asyncio.to_thread(_result_file_exists_sync, filename, user_id)
 
 
-def _result_file_exists_sync(filename: str) -> bool:
+def _result_file_exists_sync(filename: str, user_id: int | None = None) -> bool:
     bootstrap_sqlite_storage()
+    query = "SELECT 1 FROM result_items WHERE result_filename = ?"
+    params: list = [filename]
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
     with sqlite_connection() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM result_items WHERE result_filename = ? LIMIT 1",
-            (filename,),
-        ).fetchone()
+        row = conn.execute(query + " LIMIT 1", tuple(params)).fetchone()
     return row is not None
 
 
-async def delete_result_file_records(filename: str) -> int:
-    return await asyncio.to_thread(_delete_result_file_records_sync, filename)
+async def delete_result_file_records(filename: str, user_id: int | None = None) -> int:
+    return await asyncio.to_thread(_delete_result_file_records_sync, filename, user_id)
 
 
-def _delete_result_file_records_sync(filename: str) -> int:
+def _delete_result_file_records_sync(filename: str, user_id: int | None = None) -> int:
     bootstrap_sqlite_storage()
+    query = "DELETE FROM result_items WHERE result_filename = ?"
+    params: list = [filename]
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
     with sqlite_connection() as conn:
-        cursor = conn.execute(
-            "DELETE FROM result_items WHERE result_filename = ?",
-            (filename,),
-        )
+        cursor = conn.execute(query, tuple(params))
         conn.commit()
     return int(cursor.rowcount or 0)
 
@@ -263,6 +277,7 @@ async def query_result_records(
     page: int,
     limit: int,
     include_hidden: bool = False,
+    user_id: int | None = None,
 ) -> tuple[int, list[dict]]:
     return await asyncio.to_thread(
         _query_result_records_sync,
@@ -274,6 +289,7 @@ async def query_result_records(
         page,
         limit,
         include_hidden,
+        user_id,
     )
 
 
@@ -286,6 +302,7 @@ def _query_result_records_sync(
     page: int,
     limit: int,
     include_hidden: bool,
+    user_id: int | None = None,
 ) -> tuple[int, list[dict]]:
     bootstrap_sqlite_storage()
     offset = max(page - 1, 0) * limit
@@ -293,6 +310,7 @@ def _query_result_records_sync(
         records = _load_filtered_records_from_conn(
             conn,
             filename=filename,
+            user_id=user_id,
             ai_recommended_only=ai_recommended_only,
             keyword_recommended_only=keyword_recommended_only,
             sort_by=sort_by,
@@ -311,6 +329,7 @@ async def load_all_result_records(
     sort_by: str,
     sort_order: str,
     include_hidden: bool = False,
+    user_id: int | None = None,
 ) -> list[dict]:
     return await asyncio.to_thread(
         _load_all_result_records_sync,
@@ -320,6 +339,7 @@ async def load_all_result_records(
         sort_by,
         sort_order,
         include_hidden,
+        user_id,
     )
 
 
@@ -330,12 +350,14 @@ def _load_all_result_records_sync(
     sort_by: str,
     sort_order: str,
     include_hidden: bool,
+    user_id: int | None = None,
 ) -> list[dict]:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
         return _load_filtered_records_from_conn(
             conn,
             filename=filename,
+            user_id=user_id,
             ai_recommended_only=ai_recommended_only,
             keyword_recommended_only=keyword_recommended_only,
             sort_by=sort_by,
@@ -344,30 +366,33 @@ def _load_all_result_records_sync(
         )
 
 
-async def build_result_ndjson(filename: str) -> str:
-    return await asyncio.to_thread(_build_result_ndjson_sync, filename)
+async def build_result_ndjson(filename: str, user_id: int | None = None) -> str:
+    return await asyncio.to_thread(_build_result_ndjson_sync, filename, user_id)
 
 
-def _build_result_ndjson_sync(filename: str) -> str:
+def _build_result_ndjson_sync(filename: str, user_id: int | None = None) -> str:
     bootstrap_sqlite_storage()
+    query = "SELECT raw_json FROM result_items WHERE result_filename = ?"
+    params: list = [filename]
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
     with sqlite_connection() as conn:
-        rows = conn.execute(
-            "SELECT raw_json FROM result_items WHERE result_filename = ? ORDER BY id ASC",
-            (filename,),
-        ).fetchall()
+        rows = conn.execute(query + " ORDER BY id ASC", tuple(params)).fetchall()
     return "\n".join(str(row["raw_json"]) for row in rows)
 
 
-async def load_result_summary(filename: str) -> dict | None:
-    return await asyncio.to_thread(_load_result_summary_sync, filename)
+async def load_result_summary(filename: str, user_id: int | None = None) -> dict | None:
+    return await asyncio.to_thread(_load_result_summary_sync, filename, user_id)
 
 
-def _load_result_summary_sync(filename: str) -> dict | None:
+def _load_result_summary_sync(filename: str, user_id: int | None = None) -> dict | None:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
         visible_records = _load_filtered_records_from_conn(
             conn,
             filename=filename,
+            user_id=user_id,
             ai_recommended_only=False,
             keyword_recommended_only=False,
             sort_by="crawl_time",
@@ -406,60 +431,65 @@ async def update_item_status(filename: str, item_id: str, status: str) -> bool:
     valid = {"active", "hidden", "expired"}
     if status not in valid:
         raise ValueError(f"status must be one of {valid}")
-    return await asyncio.to_thread(_update_item_status_sync, filename, item_id, status)
+    return await asyncio.to_thread(_update_item_status_sync, filename, item_id, status, user_id)
 
 
-def _update_item_status_sync(filename: str, item_id: str, status: str) -> bool:
+def _update_item_status_sync(filename: str, item_id: str, status: str, user_id: int | None = None) -> bool:
     bootstrap_sqlite_storage()
+    query = "UPDATE result_items SET status = ? WHERE result_filename = ? AND item_id = ?"
+    params: list = [status, filename, item_id]
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
     with sqlite_connection() as conn:
-        cursor = conn.execute(
-            "UPDATE result_items SET status = ? WHERE result_filename = ? AND item_id = ?",
-            (status, filename, item_id),
-        )
+        cursor = conn.execute(query, tuple(params))
         conn.commit()
         return cursor.rowcount > 0
 
 
-async def load_result_blacklist_keywords(filename: str) -> list[str]:
-    return await asyncio.to_thread(_load_result_blacklist_keywords_sync, filename)
+async def load_result_blacklist_keywords(filename: str, user_id: int | None = None) -> list[str]:
+    return await asyncio.to_thread(_load_result_blacklist_keywords_sync, filename, user_id)
 
 
-def _load_result_blacklist_keywords_sync(filename: str) -> list[str]:
+def _load_result_blacklist_keywords_sync(filename: str, user_id: int | None = None) -> list[str]:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
-        return _load_blacklist_keywords_from_conn(conn, filename)
+        return _load_blacklist_keywords_from_conn(conn, filename, user_id)
 
 
-async def save_result_blacklist_keywords(filename: str, keywords: list[str]) -> list[str]:
-    return await asyncio.to_thread(_save_result_blacklist_keywords_sync, filename, keywords)
+async def save_result_blacklist_keywords(filename: str, keywords: list[str], user_id: int) -> list[str]:
+    return await asyncio.to_thread(_save_result_blacklist_keywords_sync, filename, keywords, user_id)
 
 
-def _save_result_blacklist_keywords_sync(filename: str, keywords: list[str]) -> list[str]:
+def _save_result_blacklist_keywords_sync(filename: str, keywords: list[str], user_id: int | None) -> list[str]:
     bootstrap_sqlite_storage()
+    # admin(None) 视为平台主账号作用域
+    user_id = int(user_id) if user_id else 1
     normalized_keywords = normalize_blacklist_keywords(keywords)
     now = datetime.now().isoformat()
     with sqlite_connection() as conn:
         conn.execute(
             """
             INSERT INTO result_blacklist_rules (
-                result_filename, blacklist_keywords_json, updated_at
-            ) VALUES (?, ?, ?)
-            ON CONFLICT(result_filename) DO UPDATE SET
+                result_filename, user_id, blacklist_keywords_json, updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(result_filename, user_id) DO UPDATE SET
                 blacklist_keywords_json = excluded.blacklist_keywords_json,
                 updated_at = excluded.updated_at
             """,
-            (filename, json.dumps(normalized_keywords, ensure_ascii=False), now),
+            (filename, user_id, json.dumps(normalized_keywords, ensure_ascii=False), now),
         )
         conn.commit()
     return normalized_keywords
 
 
-def load_visible_result_item_ids(filename: str) -> set[str]:
+def load_visible_result_item_ids(filename: str, user_id: int) -> set[str]:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
         visible_records = _load_filtered_records_from_conn(
             conn,
             filename=filename,
+            user_id=user_id,
             ai_recommended_only=False,
             keyword_recommended_only=False,
             sort_by="crawl_time",

@@ -3,6 +3,9 @@ playwright
 requests
 openai
 fastapi
+bcrypt
+PyJWT
+cryptography
 uvicorn[standard]
 pydantic-settings
 jinja2

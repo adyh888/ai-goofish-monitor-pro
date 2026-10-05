@@ -88,11 +88,12 @@ async def generate_criteria(
     user_description: str,
     reference_file_path: str,
     progress_callback: Optional[ProgressCallback] = None,
+    ai_client: Optional[AIClient] = None,
 ) -> str:
     """
-    Generates a new criteria file content using AI.
+    Generates a new criteria file content using AI（可注入用户自己的模型配置）。
     """
-    ai_client = AIClient()
+    ai_client = ai_client or AIClient()
     active_error: BaseException | None = None
     try:
         if not ai_client.is_available():

@@ -12,6 +12,12 @@ const routes = [
     meta: { titleKey: 'routes.login' },
   },
   {
+    path: '/activate',
+    name: 'Activate',
+    component: () => import('@/views/ActivateView.vue'),
+    meta: { titleKey: 'routes.activate' },
+  },
+  {
     path: '/',
     component: MainLayout,
     redirect: '/dashboard',
@@ -52,6 +58,24 @@ const routes = [
         component: () => import('@/views/SettingsView.vue'),
         meta: { titleKey: 'routes.settings', requiresAuth: true },
       },
+      {
+        path: 'admin/cards',
+        name: 'AdminCards',
+        component: () => import('@/views/AdminCardsView.vue'),
+        meta: { titleKey: 'routes.adminCards', requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'admin/users',
+        name: 'AdminUsers',
+        component: () => import('@/views/AdminUsersView.vue'),
+        meta: { titleKey: 'routes.adminUsers', requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'admin/settings',
+        name: 'AdminSettings',
+        component: () => import('@/views/AdminSettingsView.vue'),
+        meta: { titleKey: 'routes.adminSettings', requiresAuth: true, requiresAdmin: true },
+      },
     ],
   },
   {
@@ -76,15 +100,35 @@ function updateDocumentTitle() {
 }
 
 router.beforeEach((to, _from, next) => {
-  const { isAuthenticated } = useAuth()
+  const { isAuthenticated, membershipActive, isAdmin } = useAuth()
 
   if (to.meta.requiresAuth && !isAuthenticated.value) {
     next({ name: 'Login', query: { redirect: to.fullPath } })
-  } else if (to.name === 'Login' && isAuthenticated.value) {
-    next({ name: 'Dashboard' })
-  } else {
-    next()
+    return
   }
+
+  if (isAuthenticated.value && to.name === 'Login') {
+    next({ name: 'Dashboard' })
+    return
+  }
+
+  // 会员拦截：未激活/已过期的用户只能停留在激活页（后端 403 兜底）
+  if (
+    isAuthenticated.value &&
+    to.meta.requiresAuth &&
+    to.name !== 'Activate' &&
+    !membershipActive.value
+  ) {
+    next({ name: 'Activate' })
+    return
+  }
+
+  if (to.meta.requiresAdmin && !isAdmin.value) {
+    next({ name: 'Dashboard' })
+    return
+  }
+
+  next()
 })
 
 router.afterEach(() => {

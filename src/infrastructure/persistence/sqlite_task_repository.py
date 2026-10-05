@@ -21,16 +21,27 @@ def _row_to_task(row) -> Task:
     payload["free_shipping"] = bool(payload["free_shipping"])
     payload["is_running"] = bool(payload["is_running"])
     payload["keyword_rules"] = json.loads(payload.pop("keyword_rules_json") or "[]")
+    payload["paused_by_membership"] = bool(payload.get("paused_by_membership") or False)
     return Task(**payload)
 
 
-def find_task_by_name_sync(task_name: str) -> Task | None:
+def find_task_by_id_sync(task_id: int) -> Task | None:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
-        row = conn.execute(
-            "SELECT * FROM tasks WHERE task_name = ? ORDER BY id ASC LIMIT 1",
-            (task_name,),
-        ).fetchone()
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return _row_to_task(row) if row else None
+
+
+def find_task_by_name_sync(task_name: str, user_id: int | None = None) -> Task | None:
+    bootstrap_sqlite_storage()
+    query = "SELECT * FROM tasks WHERE task_name = ?"
+    params: list = [task_name]
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    query += " ORDER BY id ASC LIMIT 1"
+    with sqlite_connection() as conn:
+        row = conn.execute(query, tuple(params)).fetchone()
     return _row_to_task(row) if row else None
 
 
@@ -45,8 +56,8 @@ class SqliteTaskRepository(TaskRepository):
         self.db_path = db_path
         self.legacy_config_file = legacy_config_file
 
-    async def find_all(self) -> List[Task]:
-        return await asyncio.to_thread(self._find_all_sync)
+    async def find_all(self, user_id: int | None = None) -> List[Task]:
+        return await asyncio.to_thread(self._find_all_sync, user_id)
 
     async def find_by_id(self, task_id: int) -> Optional[Task]:
         return await asyncio.to_thread(self._find_by_id_sync, task_id)
@@ -57,13 +68,19 @@ class SqliteTaskRepository(TaskRepository):
     async def delete(self, task_id: int) -> bool:
         return await asyncio.to_thread(self._delete_sync, task_id)
 
-    def _find_all_sync(self) -> List[Task]:
+    def _find_all_sync(self, user_id: int | None = None) -> List[Task]:
         bootstrap_sqlite_storage(
             self.db_path,
             legacy_config_file=self.legacy_config_file,
         )
+        query = "SELECT * FROM tasks"
+        params: tuple = ()
+        if user_id is not None:
+            query += " WHERE user_id = ?"
+            params = (user_id,)
+        query += " ORDER BY id ASC"
         with sqlite_connection(self.db_path) as conn:
-            rows = conn.execute("SELECT * FROM tasks ORDER BY id ASC").fetchall()
+            rows = conn.execute(query, params).fetchall()
         return [_row_to_task(row) for row in rows]
 
     def _find_by_id_sync(self, task_id: int) -> Optional[Task]:
@@ -84,6 +101,8 @@ class SqliteTaskRepository(TaskRepository):
             task_id = task.id
             if task_id is None:
                 task_id = self._next_task_id(conn)
+            if task.user_id is None:
+                task = task.model_copy(update={"user_id": 1})
             payload = self._task_values(task.model_copy(update={"id": task_id}))
             conn.execute(
                 """
@@ -92,13 +111,15 @@ class SqliteTaskRepository(TaskRepository):
                     max_pages, personal_only, min_price, max_price, cron,
                     ai_prompt_base_file, ai_prompt_criteria_file, account_state_file,
                     account_strategy, free_shipping, new_publish_option, region,
-                    decision_mode, keyword_rules_json, is_running
+                    decision_mode, keyword_rules_json, is_running,
+                    user_id, paused_by_membership
                 ) VALUES (
                     :id, :task_name, :enabled, :keyword, :description, :analyze_images,
                     :max_pages, :personal_only, :min_price, :max_price, :cron,
                     :ai_prompt_base_file, :ai_prompt_criteria_file, :account_state_file,
                     :account_strategy, :free_shipping, :new_publish_option, :region,
-                    :decision_mode, :keyword_rules_json, :is_running
+                    :decision_mode, :keyword_rules_json, :is_running,
+                    :user_id, :paused_by_membership
                 )
                 """,
                 payload,
@@ -127,6 +148,8 @@ class SqliteTaskRepository(TaskRepository):
         values["personal_only"] = int(task.personal_only)
         values["free_shipping"] = int(task.free_shipping)
         values["is_running"] = int(task.is_running)
+        values["user_id"] = task.user_id if task.user_id is not None else 1
+        values["paused_by_membership"] = int(task.paused_by_membership)
         values["keyword_rules_json"] = json.dumps(task.keyword_rules or [], ensure_ascii=False)
         values.pop("keyword_rules", None)
         return values

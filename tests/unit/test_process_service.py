@@ -99,14 +99,29 @@ def test_process_service_adds_debug_limit_arg_when_env_enabled(monkeypatch):
     monkeypatch.setenv("SPIDER_DEBUG_LIMIT", "1")
     service = ProcessService()
 
-    command = service._build_spawn_command("task-a")
+    command = service._build_spawn_command(7, "task-a")
 
     assert command == [
         sys.executable,
         "-u",
         "spider_v2.py",
+        "--task-id",
+        "7",
         "--task-name",
         "task-a",
+        "--user-id",
+        "1",
         "--debug-limit",
         "1",
     ]
+
+
+def test_process_service_spawn_command_prefers_task_id(monkeypatch):
+    monkeypatch.delenv("SPIDER_DEBUG_LIMIT", raising=False)
+    service = ProcessService()
+
+    command = service._build_spawn_command(7, "task-a", 2)
+
+    assert "--task-id" in command
+    assert command[command.index("--task-id") + 1] == "7"
+    assert command[command.index("--user-id") + 1] == "2"

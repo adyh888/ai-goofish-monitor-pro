@@ -127,8 +127,11 @@ async def _notify_task_failure(
         )
     )
 
+    from src.failure_guard import build_task_key
+    from src.utils import get_spider_user_id
+
     guard_result = FAILURE_GUARD.record_failure(
-        task_name,
+        build_task_key(get_spider_user_id(), task_name),
         formatted_reason,
         cookie_path=cookie_path,
         min_failures_to_pause=1 if pause_immediately else None,
@@ -192,9 +195,14 @@ def _get_rotation_settings(task_config: dict) -> dict:
     account_mode = (
         account_cfg.get("mode") or os.getenv("ACCOUNT_ROTATION_MODE", "per_task")
     ).lower()
-    account_state_dir = account_cfg.get("state_dir") or os.getenv(
-        "ACCOUNT_STATE_DIR", "state"
+    from src.utils import get_user_state_dir
+
+    account_state_dir = (
+        account_cfg.get("state_dir")
+        or os.getenv("ACCOUNT_STATE_DIR", "state")
     )
+    # 多用户隔离：账号池按用户子目录加载
+    account_state_dir = get_user_state_dir()
     account_retry_limit = _as_int(
         account_cfg.get("retry_limit"),
         _as_int(os.getenv("ACCOUNT_ROTATION_RETRY_LIMIT"), 2),
@@ -474,9 +482,13 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     processed_links = set()
     history_run_id = datetime.now().strftime("%Y%m%d%H%M%S")
     history_seen_item_ids: set[str] = set()
-    historical_snapshots = load_price_snapshots(keyword)
+    from src.utils import get_spider_user_id, get_user_state_file
+
+    spider_user_id = get_spider_user_id()
+    user_state_file = get_user_state_file()
+    historical_snapshots = load_price_snapshots(keyword, user_id=spider_user_id)
     result_filename = build_result_filename(keyword)
-    processed_links = load_processed_link_keys(keyword)
+    processed_links = load_processed_link_keys(keyword, spider_user_id)
     if processed_links:
         print(f"LOG: 发现已存在结果集 {result_filename}，已加载 {len(processed_links)} 个历史商品用于去重。")
     else:
@@ -487,12 +499,12 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     runtime_plan = resolve_account_runtime_plan(
         strategy=task_config.get("account_strategy"),
         account_state_file=task_config.get("account_state_file"),
-        has_root_state_file=os.path.exists(STATE_FILE),
+        has_root_state_file=os.path.exists(user_state_file),
         available_account_files=account_items,
     )
     forced_account = runtime_plan["forced_account"]
     if runtime_plan["prefer_root_state"]:
-        account_items = [STATE_FILE]
+        account_items = [user_state_file]
         rotation_settings["account_enabled"] = False
     elif runtime_plan["use_account_pool"]:
         rotation_settings["account_enabled"] = True
@@ -516,8 +528,8 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         if forced_account:
             return RotationItem(value=forced_account)
         if not rotation_settings["account_enabled"]:
-            if os.path.exists(STATE_FILE):
-                return RotationItem(value=STATE_FILE)
+            if os.path.exists(user_state_file):
+                return RotationItem(value=user_state_file)
             return None
         if (
             rotation_settings["account_mode"] == "per_task"
@@ -955,6 +967,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                             run_id=history_run_id,
                             snapshot_time=datetime.now().isoformat(),
                             seen_item_ids=history_seen_item_ids,
+                            user_id=spider_user_id,
                         )
                     )
 
@@ -1103,6 +1116,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                         seller_id=str(user_id) if user_id else None,
                                         zhima_credit_text=zhima_credit_text,
                                         registration_duration_text=registration_duration_text,
+                                        task_id=int(task_config.get("id") or 0),
                                     )
                                 )
 
@@ -1198,11 +1212,14 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         and task_config.get("account_state_file").strip()
     ):
         pause_cookie_path = task_config.get("account_state_file").strip()
-    elif os.path.exists(STATE_FILE):
-        pause_cookie_path = STATE_FILE
+    elif os.path.exists(user_state_file):
+        pause_cookie_path = user_state_file
+
+    from src.failure_guard import build_task_key
 
     decision = FAILURE_GUARD.should_skip_start(
-        task_name_for_guard, cookie_path=pause_cookie_path
+        build_task_key(spider_user_id, task_name_for_guard),
+        cookie_path=pause_cookie_path,
     )
     if decision.skip:
         print(
@@ -1225,7 +1242,10 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             except Exception as e:
                 print(f"发送任务暂停通知失败: {e}")
 
-        cleanup_task_images(task_config.get("task_name", "default"))
+        cleanup_task_images(
+            task_config.get("task_name", "default"),
+            task_id=task_config.get("id"),
+        )
         return 0
 
     for attempt in range(1, attempt_limit + 1):
@@ -1259,7 +1279,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             print(last_error)
             break
 
-        state_path = selected_account.value if selected_account else STATE_FILE
+        state_path = selected_account.value if selected_account else user_state_file
         last_state_path = state_path
         proxy_server = selected_proxy.value if selected_proxy else None
         if rotation_settings["account_enabled"]:
@@ -1270,7 +1290,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         try:
             processed_item_count += await _run_scrape_attempt(state_path, proxy_server)
             last_error = ""
-            FAILURE_GUARD.record_success(task_name_for_guard)
+            FAILURE_GUARD.record_success(build_task_key(spider_user_id, task_name_for_guard))
             break
         except LoginRequiredError as e:
             last_error = str(e)
@@ -1291,6 +1311,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         await _notify_task_failure(task_config, last_error, cookie_path=last_state_path)
 
     # 清理任务图片目录
-    cleanup_task_images(task_config.get("task_name", "default"))
+    cleanup_task_images(
+        task_config.get("task_name", "default"),
+        task_id=task_config.get("id"),
+    )
 
     return processed_item_count

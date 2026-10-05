@@ -5,6 +5,7 @@ import os
 import random
 import re
 import glob
+import shutil
 from datetime import datetime
 from functools import wraps
 from urllib.parse import quote
@@ -119,10 +120,54 @@ def get_link_unique_key(link: str) -> str:
     return link.split('&', 1)[0]
 
 
-async def save_to_jsonl(data_record: dict, keyword: str):
-    """兼容旧调用名，实际将结果写入 SQLite。"""
+def get_spider_user_id() -> int:
+    """爬虫子进程的任务归属人（由 process_service 通过 --user-id 注入）。"""
     try:
-        return await save_result_record(data_record, keyword)
+        return max(1, int(os.getenv("SPIDER_USER_ID", "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
+def get_user_state_dir(user_id: int | None = None) -> str:
+    """登录态目录：state/u{user_id}/。
+
+    API 进程必须显式传入 user_id（取自已认证用户）；
+    不传时回退到 SPIDER_USER_ID 环境变量（仅供爬虫子进程使用），
+    API 进程未注入该变量会恒解析到 u1，导致多用户登录态写串。
+    """
+    uid = int(user_id) if user_id is not None else get_spider_user_id()
+    return os.path.join(os.getenv("ACCOUNT_STATE_DIR", "state"), f"u{uid}")
+
+
+def get_user_state_file(user_id: int | None = None) -> str:
+    """用户的根登录态文件（替代旧的全局 xianyu_state.json）。"""
+    return os.path.join(get_user_state_dir(user_id), "xianyu_state.json")
+
+
+def get_user_prompt_dir(user_id: int) -> str:
+    """用户的 Prompt 目录：admin 沿用根 prompts/（存量兼容），其他用户 prompts/u{uid}/。"""
+    return "prompts" if int(user_id) <= 1 else os.path.join("prompts", f"u{int(user_id)}")
+
+
+def seed_user_prompts(user_id: int) -> None:
+    """新用户注册时播种系统默认 Prompt（base_prompt.txt，可自行修改）。"""
+    if int(user_id) <= 1:
+        return
+    dir_path = get_user_prompt_dir(user_id)
+    os.makedirs(dir_path, exist_ok=True)
+    target = os.path.join(dir_path, "base_prompt.txt")
+    source = os.path.join("prompts", "base_prompt.txt")
+    if not os.path.exists(target) and os.path.exists(source):
+        try:
+            shutil.copyfile(source, target)
+        except OSError as exc:
+            print(f"[Prompt] 播种用户 #{user_id} 默认 Prompt 失败: {exc}")
+
+
+async def save_to_jsonl(data_record: dict, keyword: str):
+    """兼容旧调用名，实际将结果写入 SQLite（归属当前爬虫用户）。"""
+    try:
+        return await save_result_record(data_record, keyword, user_id=get_spider_user_id())
     except Exception as e:
         print(f"写入 SQLite 结果记录出错: {e}")
         return False

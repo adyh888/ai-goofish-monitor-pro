@@ -110,6 +110,7 @@ class Task(BaseModel):
     model_config = ConfigDict(use_enum_values=True, extra="ignore")
 
     id: Optional[int] = None
+    user_id: Optional[int] = None
     task_name: str
     enabled: bool
     keyword: str
@@ -130,6 +131,7 @@ class Task(BaseModel):
     decision_mode: Literal["ai", "keyword"] = "ai"
     keyword_rules: List[str] = Field(default_factory=list)
     is_running: bool = False
+    paused_by_membership: bool = False
 
     @model_validator(mode="before")
     @classmethod

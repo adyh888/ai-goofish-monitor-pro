@@ -67,16 +67,23 @@ def _sanitize_no_proxy_env() -> None:
 
 
 class AIClient:
-    """AI 客户端封装"""
+    """AI 客户端封装（可注入用户自己的模型配置，BYOK）"""
 
-    def __init__(self):
+    def __init__(self, profile=None):
+        self.profile = profile  # ai_profile_repository.AiProfile | None
         self.settings: Optional[AISettings] = None
         self.client: Optional[AsyncOpenAI] = None
         self.refresh()
 
     def _load_settings(self) -> None:
         load_dotenv(dotenv_path=env_manager.env_file, override=True)
-        self.settings = AISettings()
+        settings = AISettings()
+        if self.profile is not None:
+            settings.api_key = self.profile.api_key or ""
+            settings.base_url = self.profile.base_url
+            settings.model_name = self.profile.model_name
+            settings.proxy_url = self.profile.proxy_url or None
+        self.settings = settings
 
     def refresh(self) -> None:
         self._load_settings()

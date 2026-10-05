@@ -101,6 +101,7 @@ def record_market_snapshots(
     run_id: str,
     snapshot_time: Optional[str] = None,
     seen_item_ids: Optional[set[str]] = None,
+    user_id: int = 1,
 ) -> list[dict]:
     snapshot_time = _safe_iso_datetime(snapshot_time)
     seen = seen_item_ids if seen_item_ids is not None else set()
@@ -131,8 +132,8 @@ def record_market_snapshots(
                 INSERT OR IGNORE INTO price_snapshots (
                     keyword_slug, keyword, task_name, snapshot_time, snapshot_day,
                     run_id, item_id, title, price, price_display, tags_json, region,
-                    seller, publish_time, link
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    seller, publish_time, link, user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     keyword_slug,
@@ -150,24 +151,23 @@ def record_market_snapshots(
                     record.get("seller", ""),
                     record.get("publish_time", ""),
                     record.get("link", ""),
+                    user_id,
                 ),
             )
         conn.commit()
     return records
 
 
-def load_price_snapshots(keyword: str) -> list[dict]:
+def load_price_snapshots(keyword: str, user_id: int | None = None) -> list[dict]:
     bootstrap_sqlite_storage()
+    query = "SELECT * FROM price_snapshots WHERE keyword_slug = ?"
+    params: list = [normalize_keyword_slug(keyword)]
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    query += " ORDER BY snapshot_time ASC, id ASC"
     with sqlite_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM price_snapshots
-            WHERE keyword_slug = ?
-            ORDER BY snapshot_time ASC, id ASC
-            """,
-            (normalize_keyword_slug(keyword),),
-        ).fetchall()
+        rows = conn.execute(query, tuple(params)).fetchall()
     snapshots: list[dict] = []
     for row in rows:
         snapshots.append(
@@ -191,13 +191,15 @@ def load_price_snapshots(keyword: str) -> list[dict]:
     return snapshots
 
 
-def delete_price_snapshots(keyword: str) -> int:
+def delete_price_snapshots(keyword: str, user_id: int | None = None) -> int:
     bootstrap_sqlite_storage()
+    query = "DELETE FROM price_snapshots WHERE keyword_slug = ?"
+    params: list = [normalize_keyword_slug(keyword)]
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
     with sqlite_connection() as conn:
-        cursor = conn.execute(
-            "DELETE FROM price_snapshots WHERE keyword_slug = ?",
-            (normalize_keyword_slug(keyword),),
-        )
+        cursor = conn.execute(query, tuple(params))
         conn.commit()
     return int(cursor.rowcount or 0)
 
@@ -366,8 +368,9 @@ def build_price_history_insights(
     *,
     window_days: int = DEFAULT_HISTORY_WINDOW_DAYS,
     visible_item_ids: Optional[set[str]] = None,
+    user_id: int | None = None,
 ) -> dict:
-    snapshots = load_price_snapshots(keyword)
+    snapshots = load_price_snapshots(keyword, user_id=user_id)
     if visible_item_ids is not None:
         snapshots = [
             snapshot

@@ -23,6 +23,7 @@ class AiProfile:
     enabled: bool
     is_active: bool
     sort_order: int
+    user_id: int = 1
 
 
 def _row_to_profile(row) -> AiProfile:
@@ -36,30 +37,36 @@ def _row_to_profile(row) -> AiProfile:
         enabled=bool(row["enabled"]),
         is_active=bool(row["is_active"]),
         sort_order=row["sort_order"],
+        user_id=row["user_id"],
     )
 
 
-def list_profiles_sync() -> list[AiProfile]:
+def list_profiles_sync(user_id: int | None = None) -> list[AiProfile]:
     bootstrap_sqlite_storage()
+    query = "SELECT * FROM ai_profiles"
+    params: tuple = ()
+    if user_id is not None:
+        query += " WHERE user_id = ?"
+        params = (user_id,)
+    query += " ORDER BY sort_order ASC, id ASC"
     with sqlite_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM ai_profiles ORDER BY sort_order ASC, id ASC"
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
     return [_row_to_profile(row) for row in rows]
 
 
-def list_enabled_profiles_active_first_sync() -> list[AiProfile]:
-    """failover 候选顺序：当前激活的排最前，其余按优先级排序（仅启用的）。"""
-    profiles = [p for p in list_profiles_sync() if p.enabled]
+def list_enabled_profiles_active_first_sync(user_id: int = 1) -> list[AiProfile]:
+    """failover 候选顺序：当前激活的排最前，其余按优先级排序（仅启用的，按用户隔离）。"""
+    profiles = [p for p in list_profiles_sync(user_id) if p.enabled]
     profiles.sort(key=lambda p: (not p.is_active, p.sort_order, p.id))
     return profiles
 
 
-def get_active_profile_sync() -> AiProfile | None:
+def get_active_profile_sync(user_id: int = 1) -> AiProfile | None:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM ai_profiles WHERE is_active = 1 LIMIT 1"
+            "SELECT * FROM ai_profiles WHERE is_active = 1 AND user_id = ? LIMIT 1",
+            (user_id,),
         ).fetchone()
     return _row_to_profile(row) if row else None
 
@@ -81,19 +88,23 @@ def create_profile_sync(
     api_key: str = "",
     proxy_url: str = "",
     enabled: bool = True,
+    user_id: int = 1,
 ) -> AiProfile:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
-        is_first = conn.execute("SELECT COUNT(1) AS total FROM ai_profiles").fetchone()
+        is_first = conn.execute(
+            "SELECT COUNT(1) AS total FROM ai_profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
         is_active = 1 if (is_first is None or int(is_first["total"]) == 0) else 0
         max_order = conn.execute(
-            "SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM ai_profiles"
+            "SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM ai_profiles WHERE user_id = ?",
+            (user_id,),
         ).fetchone()
         cursor = conn.execute(
             """
             INSERT INTO ai_profiles
-                (name, base_url, api_key, model_name, proxy_url, enabled, is_active, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (name, base_url, api_key, model_name, proxy_url, enabled, is_active, sort_order, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -104,6 +115,7 @@ def create_profile_sync(
                 1 if enabled else 0,
                 is_active,
                 int(max_order["max_order"]) + 1,
+                user_id,
             ),
         )
         new_id = cursor.lastrowid
@@ -114,6 +126,7 @@ def create_profile_sync(
 def update_profile_sync(
     profile_id: int,
     *,
+    user_id: int | None = None,
     name: str | None = None,
     base_url: str | None = None,
     model_name: str | None = None,
@@ -146,7 +159,7 @@ def update_profile_sync(
             (*fields.values(), profile_id),
         )
         if fields.get("enabled") == 0:
-            _ensure_active_profile_valid(conn)
+            _ensure_active_profile_valid(conn, user_id=user_id)
         conn.commit()
     return get_profile_sync(profile_id)
 
@@ -154,9 +167,14 @@ def update_profile_sync(
 def delete_profile_sync(profile_id: int) -> bool:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
+        owner_row = conn.execute(
+            "SELECT user_id FROM ai_profiles WHERE id = ?", (profile_id,)
+        ).fetchone()
         cursor = conn.execute("DELETE FROM ai_profiles WHERE id = ?", (profile_id,))
         deleted = cursor.rowcount > 0
-        _ensure_active_profile_valid(conn)
+        _ensure_active_profile_valid(
+            conn, user_id=owner_row["user_id"] if owner_row else user_id
+        )
         conn.commit()
     return deleted
 
@@ -165,13 +183,16 @@ def set_active_profile_sync(profile_id: int) -> AiProfile | None:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
         row = conn.execute(
-            "SELECT enabled FROM ai_profiles WHERE id = ?", (profile_id,)
+            "SELECT enabled, user_id FROM ai_profiles WHERE id = ?", (profile_id,)
         ).fetchone()
         if row is None:
             return None
         if not row["enabled"]:
             raise ValueError("已禁用的模型不能设为当前模型")
-        conn.execute("UPDATE ai_profiles SET is_active = 0 WHERE is_active = 1")
+        conn.execute(
+            "UPDATE ai_profiles SET is_active = 0 WHERE is_active = 1 AND user_id = ?",
+            (row["user_id"],),
+        )
         conn.execute("UPDATE ai_profiles SET is_active = 1 WHERE id = ?", (profile_id,))
         conn.commit()
     return get_profile_sync(profile_id)
@@ -214,17 +235,32 @@ def move_profile_sync(profile_id: int, direction: str) -> list[AiProfile]:
     return list_profiles_sync()
 
 
-def _ensure_active_profile_valid(conn) -> None:
-    """激活配置被删除/禁用后，把激活位转移到第一个启用的配置上。"""
-    active = conn.execute(
-        "SELECT id, enabled FROM ai_profiles WHERE is_active = 1 LIMIT 1"
-    ).fetchone()
+def _ensure_active_profile_valid(conn, user_id: int | None = None) -> None:
+    """激活配置被删除/禁用后，把激活位转移到第一个启用的配置上（按用户隔离）。"""
+    scope_clause = ""
+    params: list = []
+    if user_id is not None:
+        scope_clause = " AND user_id = ?"
+        params.append(user_id)
+    active_query = (
+        "SELECT id, enabled FROM ai_profiles WHERE is_active = 1"
+        + ("" if user_id is None else " AND user_id = ?")
+        + " LIMIT 1"
+    )
+    active = conn.execute(active_query, tuple(params)).fetchone()
     if active is not None and active["enabled"]:
         return
-    conn.execute("UPDATE ai_profiles SET is_active = 0 WHERE is_active = 1")
-    fallback = conn.execute(
-        "SELECT id FROM ai_profiles WHERE enabled = 1 ORDER BY sort_order ASC, id ASC LIMIT 1"
-    ).fetchone()
+    conn.execute(
+        "UPDATE ai_profiles SET is_active = 0 WHERE is_active = 1"
+        + ("" if user_id is None else " AND user_id = ?"),
+        tuple(params),
+    )
+    fallback_query = (
+        "SELECT id FROM ai_profiles WHERE enabled = 1"
+        + ("" if user_id is None else " AND user_id = ?")
+        + " ORDER BY sort_order ASC, id ASC LIMIT 1"
+    )
+    fallback = conn.execute(fallback_query, tuple(params)).fetchone()
     if fallback is not None:
         conn.execute(
             "UPDATE ai_profiles SET is_active = 1 WHERE id = ?", (fallback["id"],)

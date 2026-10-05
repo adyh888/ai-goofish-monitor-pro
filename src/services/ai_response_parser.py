@@ -57,7 +57,48 @@ def parse_ai_response_json(content: str) -> dict:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
+        # 模型偶发丢右括号（如 json_object 模式下少一个 `}`），先尝试补齐再走片段兜底
+        repaired = _repair_unbalanced_json(cleaned)
+        if repaired is not None:
+            try:
+                parsed = json.loads(repaired)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict) and any(k in parsed for k in _RESULT_MARKER_KEYS):
+                return parsed
         return _extract_first_json_value(cleaned, exc)
+
+
+def _repair_unbalanced_json(content: str) -> str | None:
+    """补齐字符串外缺失的收尾括号；结构错乱（引号未闭合/括号交错）时返回 None。"""
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for char in content:
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char == "}":
+            if not stack or stack[-1] != "{":
+                return None
+            stack.pop()
+        elif char == "]":
+            if not stack or stack[-1] != "[":
+                return None
+            stack.pop()
+    if in_string or not stack:
+        return None
+    return content + "".join("}" if c == "{" else "]" for c in reversed(stack))
 
 
 def _coerce_content_parts(content: Any) -> str:

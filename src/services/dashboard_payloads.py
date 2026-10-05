@@ -227,8 +227,9 @@ def _build_scan_activity(
 async def summarize_result_file(
     filename: str,
     task_lookup: dict[str, Task],
+    user_id: int | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], datetime | None]:
-    metrics = await load_result_summary(filename)
+    metrics = await load_result_summary(filename, user_id=user_id)
     if not metrics:
         return None, [], None
 

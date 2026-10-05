@@ -16,12 +16,18 @@ def validate_result_filename(filename: str) -> None:
         raise ValueError("无效的文件名")
 
 
-def enrich_records_with_price_insight(records: list[dict], filename: str) -> list[dict]:
-    snapshots = load_price_snapshots(normalize_keyword_from_filename(filename))
+def enrich_records_with_price_insight(
+    records: list[dict],
+    filename: str,
+    user_id: int | None = None,
+) -> list[dict]:
+    snapshots = load_price_snapshots(
+        normalize_keyword_from_filename(filename), user_id=user_id
+    )
     if not snapshots:
         return records
 
-    visible_item_ids = load_visible_result_item_ids(filename)
+    visible_item_ids = load_visible_result_item_ids(filename, user_id)
     visible_snapshots = [
         snapshot
         for snapshot in snapshots

@@ -110,7 +110,50 @@ SCHEMA_STATEMENTS = (
         sort_order INTEGER NOT NULL DEFAULT 0
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'user',
+        status TEXT NOT NULL DEFAULT 'active',
+        expired_at TEXT,
+        created_at TEXT NOT NULL,
+        last_login_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS card_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        duration_days INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unused',
+        batch_no TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        agent_id INTEGER,
+        used_by INTEGER,
+        used_at TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_notification_configs (
+        user_id INTEGER PRIMARY KEY,
+        config_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_proxy_configs (
+        user_id INTEGER PRIMARY KEY,
+        config_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_name ON tasks(task_name)",
+    "CREATE INDEX IF NOT EXISTS idx_card_keys_status ON card_keys(status)",
+    "CREATE INDEX IF NOT EXISTS idx_card_keys_batch ON card_keys(batch_no)",
+    "CREATE INDEX IF NOT EXISTS idx_card_keys_used_by ON card_keys(used_by)",
     """
     CREATE INDEX IF NOT EXISTS idx_results_filename_crawl
     ON result_items(result_filename, crawl_time DESC)
@@ -156,6 +199,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
     _migrate_result_items_status(conn)
+    _migrate_membership_user_scope(conn)
     conn.commit()
 
 
@@ -178,6 +222,199 @@ def _migrate_result_items_status(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_results_filename_status_crawl"
         " ON result_items(result_filename, status, crawl_time DESC)"
     )
+
+
+MEMBERSHIP_SCOPE_MIGRATION_KEY = "migration:membership_user_scope"
+
+
+def _migrate_membership_user_scope(conn: sqlite3.Connection) -> None:
+    """SaaS 多用户迁移：所有业务表加 user_id（存量数据归管理员 id=1），
+    结果/快照/黑名单表重建唯一约束使不同用户互不冲突（仅执行一次）。
+
+    说明：admin 用户在 bootstrap 阶段第一个创建，id 恒为 1，
+    因此本迁移可以安全地把存量数据的 user_id 固定为 1。
+    """
+    row = conn.execute(
+        "SELECT value FROM app_metadata WHERE key = ?",
+        (MEMBERSHIP_SCOPE_MIGRATION_KEY,),
+    ).fetchone()
+    if row is not None:
+        return
+
+    # 1) tasks / ai_profiles：加列即可（不参与唯一约束）
+    task_cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    if "user_id" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+    if "paused_by_membership" not in task_cols:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN paused_by_membership INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute("UPDATE tasks SET user_id = 1 WHERE user_id IS NULL")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id, enabled)"
+    )
+
+    profile_cols = [
+        r[1] for r in conn.execute("PRAGMA table_info(ai_profiles)").fetchall()
+    ]
+    if "user_id" not in profile_cols:
+        conn.execute(
+            "ALTER TABLE ai_profiles ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1"
+        )
+    conn.execute("UPDATE ai_profiles SET user_id = 1 WHERE user_id IS NULL")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_profiles_user"
+        " ON ai_profiles(user_id, sort_order)"
+    )
+
+    # 2) result_items：重建表，唯一键加入 user_id
+    conn.execute(
+        """
+        CREATE TABLE result_items_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            result_filename TEXT NOT NULL,
+            keyword TEXT NOT NULL,
+            task_name TEXT NOT NULL,
+            crawl_time TEXT NOT NULL,
+            publish_time TEXT,
+            price REAL,
+            price_display TEXT,
+            item_id TEXT,
+            title TEXT,
+            link TEXT,
+            link_unique_key TEXT NOT NULL,
+            seller_nickname TEXT,
+            is_recommended INTEGER NOT NULL,
+            analysis_source TEXT,
+            keyword_hit_count INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            raw_json TEXT NOT NULL,
+            user_id INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(result_filename, link_unique_key, user_id)
+        )
+        """
+    )
+    result_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(result_items)").fetchall()
+    }
+    result_user_expr = "COALESCE(user_id, 1)" if "user_id" in result_cols else "1"
+    conn.execute(
+        f"""
+        INSERT INTO result_items_new (
+            id, result_filename, keyword, task_name, crawl_time, publish_time,
+            price, price_display, item_id, title, link, link_unique_key,
+            seller_nickname, is_recommended, analysis_source, keyword_hit_count,
+            status, raw_json, user_id
+        )
+        SELECT id, result_filename, keyword, task_name, crawl_time, publish_time,
+               price, price_display, item_id, title, link, link_unique_key,
+               seller_nickname, is_recommended, analysis_source, keyword_hit_count,
+               status, raw_json, {result_user_expr}
+        FROM result_items
+        """
+    )
+    conn.execute("DROP TABLE result_items")
+    conn.execute("ALTER TABLE result_items_new RENAME TO result_items")
+
+    # 3) price_snapshots：重建表，唯一键加入 user_id
+    conn.execute(
+        """
+        CREATE TABLE price_snapshots_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword_slug TEXT NOT NULL,
+            keyword TEXT NOT NULL,
+            task_name TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            snapshot_day TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            title TEXT,
+            price REAL NOT NULL,
+            price_display TEXT,
+            tags_json TEXT NOT NULL,
+            region TEXT,
+            seller TEXT,
+            publish_time TEXT,
+            link TEXT,
+            user_id INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(keyword_slug, run_id, item_id, user_id)
+        )
+        """
+    )
+    snapshot_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(price_snapshots)").fetchall()
+    }
+    snapshot_user_expr = (
+        "COALESCE(user_id, 1)" if "user_id" in snapshot_cols else "1"
+    )
+    conn.execute(
+        f"""
+        INSERT INTO price_snapshots_new (
+            keyword_slug, keyword, task_name, snapshot_time, snapshot_day,
+            run_id, item_id, title, price, price_display, tags_json,
+            region, seller, publish_time, link, user_id
+        )
+        SELECT keyword_slug, keyword, task_name, snapshot_time, snapshot_day,
+               run_id, item_id, title, price, price_display, tags_json,
+               region, seller, publish_time, link, {snapshot_user_expr}
+        FROM price_snapshots
+        """
+    )
+    conn.execute("DROP TABLE price_snapshots")
+    conn.execute("ALTER TABLE price_snapshots_new RENAME TO price_snapshots")
+
+    # 4) result_blacklist_rules：主键加入 user_id
+    conn.execute(
+        """
+        CREATE TABLE result_blacklist_rules_new (
+            result_filename TEXT NOT NULL,
+            user_id INTEGER NOT NULL DEFAULT 1,
+            blacklist_keywords_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (result_filename, user_id)
+        )
+        """
+    )
+    blacklist_cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(result_blacklist_rules)").fetchall()
+    }
+    blacklist_user_expr = (
+        "COALESCE(user_id, 1)" if "user_id" in blacklist_cols else "1"
+    )
+    conn.execute(
+        f"""
+        INSERT INTO result_blacklist_rules_new (
+            result_filename, user_id, blacklist_keywords_json, updated_at
+        )
+        SELECT result_filename, {blacklist_user_expr}, blacklist_keywords_json, updated_at
+        FROM result_blacklist_rules
+        """
+    )
+    conn.execute("DROP TABLE result_blacklist_rules")
+    conn.execute("ALTER TABLE result_blacklist_rules_new RENAME TO result_blacklist_rules")
+
+    # 5) 重建索引（表重建后旧索引已随表删除）
+    for statement in _POST_MIGRATION_INDEX_STATEMENTS:
+        conn.execute(statement)
+
+    conn.execute(
+        "INSERT OR REPLACE INTO app_metadata(key, value) VALUES (?, 'done')",
+        (MEMBERSHIP_SCOPE_MIGRATION_KEY,),
+    )
+
+
+_POST_MIGRATION_INDEX_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS idx_results_filename_crawl ON result_items(result_filename, crawl_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_results_filename_publish ON result_items(result_filename, publish_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_results_filename_price ON result_items(result_filename, price DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_results_filename_recommended ON result_items(result_filename, is_recommended, analysis_source, crawl_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_results_filename_status_crawl ON result_items(result_filename, status, crawl_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_results_user_filename_crawl ON result_items(user_id, result_filename, crawl_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_results_user_status_crawl ON result_items(user_id, status, crawl_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_snapshots_keyword_time ON price_snapshots(keyword_slug, snapshot_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_snapshots_keyword_item_time ON price_snapshots(keyword_slug, item_id, snapshot_time DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_snapshots_user_keyword_time ON price_snapshots(user_id, keyword_slug, snapshot_time DESC)",
+)
 
 
 @contextmanager
