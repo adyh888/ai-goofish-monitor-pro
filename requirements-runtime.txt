@@ -13,3 +13,6 @@ httpx[socks]
 Pillow
 pyzbar
 qrcode
+bcrypt
+PyJWT
+cryptography
