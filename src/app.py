@@ -3,6 +3,56 @@
 整合所有路由和服务
 """
 import asyncio
+import logging
+import os
+import sys
+from logging.handlers import RotatingFileHandler
+
+
+def _setup_backend_file_log() -> None:
+    """把 stdout/stderr 同时写入 logs/backend.log（控制台输出不受影响）。
+
+    项目内日志基本都是 print()，这里用 Tee 方式统一接管，
+    uvicorn 的日志（在其 configure_logging 时取当前 sys.stderr）也会被捕获。
+    """
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    log_dir = os.path.join(project_root, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    handler = RotatingFileHandler(
+        os.path.join(log_dir, "backend.log"),
+        maxBytes=10 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+
+    class _Tee:
+        def __init__(self, stream):
+            self._stream = stream
+
+        def write(self, data):
+            self._stream.write(data)
+            if data and data.strip():
+                record = logging.LogRecord(
+                    "backend", logging.INFO, "", 0, data.rstrip("\n"), None, None
+                )
+                try:
+                    handler.emit(record)
+                except Exception:
+                    pass
+
+        def flush(self):
+            self._stream.flush()
+
+        def __getattr__(self, name):
+            return getattr(self._stream, name)
+
+    sys.stdout = _Tee(sys.stdout)
+    sys.stderr = _Tee(sys.stderr)
+
+
+_setup_backend_file_log()
+
 from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
