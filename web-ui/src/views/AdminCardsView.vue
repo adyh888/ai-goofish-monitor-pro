@@ -107,10 +107,44 @@ async function handleToggleStatus(card: CardKeyItem) {
 }
 
 function copyCodes() {
-  navigator.clipboard.writeText(resultCodes.value.join('\n')).then(
-    () => toast({ description: t('admin.cards.copied') }),
-    () => toast({ description: t('admin.cards.copyFailed'), variant: 'destructive' }),
-  )
+  const text = resultCodes.value.join('\n')
+
+  // HTTP 非安全上下文下 navigator.clipboard 为 undefined，降级为 execCommand 复制
+  const fallbackCopy = () => {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.setAttribute('readonly', '')
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    // 挂进当前弹窗容器内，避免 Dialog 焦点陷阱抢走焦点导致复制到空内容
+    const container = document.querySelector('[role="dialog"]') ?? document.body
+    const prevActive = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    container.appendChild(textarea)
+    textarea.focus()
+    textarea.setSelectionRange(0, text.length)
+    let ok = false
+    try {
+      ok = document.execCommand('copy')
+    } catch {
+      ok = false
+    }
+    textarea.remove()
+    prevActive?.focus()
+    if (ok) {
+      toast({ description: t('admin.cards.copied') })
+    } else {
+      toast({ description: t('admin.cards.copyFailed'), variant: 'destructive' })
+    }
+  }
+
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => toast({ description: t('admin.cards.copied') }),
+      fallbackCopy,
+    )
+  } else {
+    fallbackCopy()
+  }
 }
 
 function downloadTxt(content: string, filename: string) {

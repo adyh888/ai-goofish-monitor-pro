@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 from types import SimpleNamespace
 
@@ -125,3 +126,72 @@ def test_process_service_spawn_command_prefers_task_id(monkeypatch):
     assert "--task-id" in command
     assert command[command.index("--task-id") + 1] == "7"
     assert command[command.index("--user-id") + 1] == "2"
+
+
+def _setup_user_state_dir(tmp_path, monkeypatch, user_id: int):
+    state_root = tmp_path / "state"
+    user_dir = state_root / f"u{user_id}"
+    user_dir.mkdir(parents=True)
+    monkeypatch.setenv("ACCOUNT_STATE_DIR", str(state_root))
+    return user_dir
+
+
+def test_resolve_cookie_path_prefers_existing_fixed_account(monkeypatch, tmp_path):
+    user_dir = _setup_user_state_dir(tmp_path, monkeypatch, 4)
+    fixed_path = user_dir / "fixed.json"
+    fixed_path.write_text("{}", encoding="utf-8")
+    (user_dir / "newer_named.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "src.services.process_service.find_task_by_name_sync",
+        lambda *_args, **_kwargs: SimpleNamespace(account_state_file=str(fixed_path)),
+    )
+
+    service = ProcessService()
+    assert service._resolve_cookie_path("task-a", 4) == str(fixed_path)
+
+
+def test_resolve_cookie_path_prefers_root_state_file(monkeypatch, tmp_path):
+    user_dir = _setup_user_state_dir(tmp_path, monkeypatch, 4)
+    root_state = user_dir / "xianyu_state.json"
+    root_state.write_text("{}", encoding="utf-8")
+    (user_dir / "xiaoniu.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "src.services.process_service.find_task_by_name_sync",
+        lambda *_args, **_kwargs: None,
+    )
+
+    service = ProcessService()
+    assert service._resolve_cookie_path("task-a", 4) == str(root_state)
+
+
+def test_resolve_cookie_path_falls_back_to_latest_named_account(monkeypatch, tmp_path):
+    """auto 策略只有命名账号时，回落到用户目录内最近更新的 .json，
+    让失败保护能感知 Cookie 更新并自动解除暂停。"""
+    user_dir = _setup_user_state_dir(tmp_path, monkeypatch, 4)
+    older = user_dir / "older.json"
+    newer = user_dir / "xiaoniu.json"
+    older.write_text("{}", encoding="utf-8")
+    os.utime(older, (1_000_000_000, 1_000_000_000))
+    newer.write_text("{}", encoding="utf-8")
+    os.utime(newer, (2_000_000_000, 2_000_000_000))
+
+    monkeypatch.setattr(
+        "src.services.process_service.find_task_by_name_sync",
+        lambda *_args, **_kwargs: None,
+    )
+
+    service = ProcessService()
+    assert service._resolve_cookie_path("task-a", 4) == str(newer)
+
+
+def test_resolve_cookie_path_returns_none_without_any_state(monkeypatch, tmp_path):
+    _setup_user_state_dir(tmp_path, monkeypatch, 4)
+    monkeypatch.setattr(
+        "src.services.process_service.find_task_by_name_sync",
+        lambda *_args, **_kwargs: None,
+    )
+
+    service = ProcessService()
+    assert service._resolve_cookie_path("task-a", 4) is None

@@ -71,18 +71,40 @@ class ProcessService:
             await result
 
     def _resolve_cookie_path(self, task_name: str, user_id: int | None = None) -> str | None:
-        """Best-effort cookie/state path for a task（按用户隔离）。"""
+        """Best-effort cookie/state path for a task（按用户隔离）。
+
+        依次回退：任务固定账号 → 用户根登录态 → 用户目录内最近更新的命名账号，
+        保证 auto/rotate 策略（账号管理中的命名账号）下失败保护也能感知
+        Cookie 更新并自动解除任务暂停。
+        """
         try:
             task = find_task_by_name_sync(task_name, user_id)
             if task and isinstance(task.account_state_file, str) and task.account_state_file.strip():
-                return task.account_state_file.strip()
+                fixed_path = task.account_state_file.strip()
+                if os.path.exists(fixed_path):
+                    return fixed_path
         except Exception:
             pass
 
-        from src.utils import get_user_state_file
+        from src.utils import get_user_state_dir, get_user_state_file
 
         state_file = get_user_state_file(user_id)
-        return state_file if os.path.exists(state_file) else None
+        if os.path.exists(state_file):
+            return state_file
+
+        try:
+            state_dir = get_user_state_dir(user_id)
+            candidates = [
+                os.path.join(state_dir, name)
+                for name in os.listdir(state_dir)
+                if name.endswith(".json")
+            ]
+            candidates = [path for path in candidates if os.path.isfile(path)]
+            if candidates:
+                return max(candidates, key=os.path.getmtime)
+        except OSError:
+            return None
+        return None
 
     def _resolve_task_owner(self, task_id: int) -> int:
         """任务归属人（爬虫子进程与用户级配置都以它为准）。"""

@@ -4,6 +4,8 @@ import json
 import sys
 import types
 
+import pytest
+
 
 def test_cli_runs_single_task_with_prompt(tmp_path, load_json_fixture, monkeypatch):
     fake_scraper = types.ModuleType("src.scraper")
@@ -77,9 +79,11 @@ def test_cli_runs_keyword_mode_without_prompt_files(tmp_path, load_json_fixture,
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config_data, ensure_ascii=False), encoding="utf-8")
 
-    state_path = tmp_path / "state.json"
-    state_path.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(spider_v2, "STATE_FILE", str(state_path))
+    state_root = tmp_path / "state"
+    (state_root / "u2").mkdir(parents=True)
+    (state_root / "u2" / "named_account.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ACCOUNT_STATE_DIR", str(state_root))
+    monkeypatch.setenv("SPIDER_USER_ID", "2")
 
     captured = []
 
@@ -113,7 +117,7 @@ class _FakeTask:
         data.update(kwargs)
         self._data = data
 
-    def dict(self):
+    def model_dump(self):
         return dict(self._data)
 
 
@@ -143,9 +147,11 @@ def test_cli_task_id_beats_same_name_task(tmp_path, monkeypatch):
 
     monkeypatch.setattr(spider_v2, "SqliteTaskRepository", lambda: FakeRepo())
 
-    state_path = tmp_path / "state.json"
-    state_path.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(spider_v2, "STATE_FILE", str(state_path))
+    state_root = tmp_path / "state"
+    (state_root / "u2").mkdir(parents=True)
+    (state_root / "u2" / "named_account.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ACCOUNT_STATE_DIR", str(state_root))
+    monkeypatch.setenv("SPIDER_USER_ID", "2")
 
     captured = []
 
@@ -187,9 +193,11 @@ def test_cli_task_id_from_other_user_not_found(tmp_path, monkeypatch):
 
     monkeypatch.setattr(spider_v2, "SqliteTaskRepository", lambda: FakeRepo())
 
-    state_path = tmp_path / "state.json"
-    state_path.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(spider_v2, "STATE_FILE", str(state_path))
+    state_root = tmp_path / "state"
+    (state_root / "u2").mkdir(parents=True)
+    (state_root / "u2" / "named_account.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ACCOUNT_STATE_DIR", str(state_root))
+    monkeypatch.setenv("SPIDER_USER_ID", "2")
 
     captured = []
 
@@ -207,3 +215,100 @@ def test_cli_task_id_from_other_user_not_found(tmp_path, monkeypatch):
     asyncio.run(spider_v2.main())
 
     assert captured == []
+
+
+def _install_fake_scraper(monkeypatch):
+    fake_scraper = types.ModuleType("src.scraper")
+
+    async def placeholder_scrape(task_config, debug_limit):
+        return 0
+
+    fake_scraper.scrape_xianyu = placeholder_scrape
+    monkeypatch.setitem(sys.modules, "src.scraper", fake_scraper)
+    sys.modules.pop("spider_v2", None)
+    return importlib.import_module("spider_v2")
+
+
+def test_cli_accepts_named_account_in_user_state_dir(tmp_path, monkeypatch):
+    """回归（云端 SaaS 干净环境）：只有 state/u{uid}/命名账号.json、
+    任务为 auto 未绑定固定账号时，启动自检必须放行（旧逻辑只扫 state/ 顶层会误退出）。"""
+    spider_v2 = _install_fake_scraper(monkeypatch)
+
+    task = _FakeTask(
+        id=3,
+        user_id=4,
+        task_name="iphone17pro max",
+        keyword="iphone17pro max",
+        decision_mode="keyword",
+        keyword_rules=["iphone"],
+        account_state_file=None,
+    )
+
+    class FakeRepo:
+        async def find_all(self, user_id=None):
+            return [task]
+
+    monkeypatch.setattr(spider_v2, "SqliteTaskRepository", lambda: FakeRepo())
+
+    state_root = tmp_path / "state"
+    (state_root / "u4").mkdir(parents=True)
+    (state_root / "u4" / "xiaoniu.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ACCOUNT_STATE_DIR", str(state_root))
+    monkeypatch.setenv("SPIDER_USER_ID", "4")
+
+    captured = []
+
+    async def fake_scrape(task_config, debug_limit):
+        captured.append(task_config)
+        return 1
+
+    monkeypatch.setattr(spider_v2, "scrape_xianyu", fake_scrape)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["spider_v2.py", "--task-id", "3", "--task-name", "iphone17pro max", "--user-id", "4"],
+    )
+
+    asyncio.run(spider_v2.main())
+
+    assert len(captured) == 1
+    assert captured[0]["id"] == 3
+
+
+def test_cli_exits_without_any_state_file(tmp_path, monkeypatch):
+    """无任何登录态、任务也未绑定固定账号时，延续旧行为直接退出报错。"""
+    spider_v2 = _install_fake_scraper(monkeypatch)
+
+    task = _FakeTask(
+        id=3,
+        user_id=4,
+        task_name="iphone17pro max",
+        keyword="iphone17pro max",
+        decision_mode="keyword",
+        keyword_rules=["iphone"],
+        account_state_file=None,
+    )
+
+    class FakeRepo:
+        async def find_all(self, user_id=None):
+            return [task]
+
+    monkeypatch.setattr(spider_v2, "SqliteTaskRepository", lambda: FakeRepo())
+
+    state_root = tmp_path / "state"
+    state_root.mkdir(parents=True)
+    monkeypatch.setenv("ACCOUNT_STATE_DIR", str(state_root))
+    monkeypatch.setenv("SPIDER_USER_ID", "4")
+
+    async def fake_scrape(task_config, debug_limit):
+        raise AssertionError("自检失败时不应执行抓取")
+
+    monkeypatch.setattr(spider_v2, "scrape_xianyu", fake_scrape)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["spider_v2.py", "--task-id", "3", "--task-name", "iphone17pro max", "--user-id", "4"],
+    )
+
+    with pytest.raises(SystemExit):
+        asyncio.run(spider_v2.main())

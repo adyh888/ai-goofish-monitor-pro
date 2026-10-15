@@ -52,7 +52,7 @@ async def main():
         # 避免按名匹配时拿到其他用户同名任务的配置
         user_scope = args.user_id if args.user_id and args.user_id > 0 else None
         tasks = await repository.find_all(user_scope)
-        tasks_config = [task.dict() for task in tasks]
+        tasks_config = [task.model_dump() for task in tasks]
 
     def normalize_keywords(value):
         if value is None:
@@ -91,15 +91,37 @@ async def main():
                 return True
         return False
 
-    def has_any_state_file() -> bool:
-        state_dir = os.getenv("ACCOUNT_STATE_DIR", "state").strip().strip('"').strip("'")
-        if os.path.isdir(state_dir):
-            for name in os.listdir(state_dir):
-                if name.endswith(".json"):
+    def has_user_state_file() -> bool:
+        """当前爬虫用户是否已配置登录态（按 state/u{uid}/ 多用户隔离）。
+
+        - 用户根登录态 state/u{uid}/xianyu_state.json
+        - “账号管理”中添加的命名账号 state/u{uid}/*.json（auto/rotate 策略使用）
+        - admin(uid=1) 额外兼容旧版单用户部署：根目录 xianyu_state.json、state/ 顶层文件
+        """
+        from src.utils import get_spider_user_id, get_user_state_dir, get_user_state_file
+
+        uid = get_spider_user_id()
+
+        if os.path.exists(get_user_state_file(uid)):
+            return True
+
+        user_state_dir = get_user_state_dir(uid)
+        if os.path.isdir(user_state_dir):
+            for name in os.listdir(user_state_dir):
+                if name.endswith(".json") and os.path.isfile(os.path.join(user_state_dir, name)):
                     return True
+
+        if uid <= 1:
+            if os.path.exists(STATE_FILE):
+                return True
+            legacy_state_dir = os.getenv("ACCOUNT_STATE_DIR", "state").strip().strip('"').strip("'")
+            if os.path.isdir(legacy_state_dir):
+                for name in os.listdir(legacy_state_dir):
+                    if name.endswith(".json") and os.path.isfile(os.path.join(legacy_state_dir, name)):
+                        return True
         return False
 
-    if not os.path.exists(STATE_FILE) and not has_bound_account(tasks_config) and not has_any_state_file():
+    if not has_bound_account(tasks_config) and not has_user_state_file():
         sys.exit(
             f"错误: 未找到登录状态文件。请在 state/ 中添加账号或配置 account_state_file。"
         )
