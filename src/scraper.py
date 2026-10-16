@@ -43,6 +43,7 @@ from src.utils import (
     save_to_jsonl,
 )
 from src.rotation import RotationPool, load_state_files, parse_proxy_pool, RotationItem
+from src.services.region_filter import matches_any, parse_region
 from src.failure_guard import FailureGuard
 from src.services.account_strategy_service import resolve_account_runtime_plan
 from src.infrastructure.persistence.storage_names import build_result_filename
@@ -71,8 +72,20 @@ class LoginRequiredError(Exception):
     """Raised when Goofish redirects to the passport/mini_login flow."""
 
 
+class RegionFilterError(Exception):
+    """Raised when the task's region filter could not be applied on the search page.
+
+    地区筛选未生效时继续抓取会得到全国数据，因此这里直接终止任务而不是静默跳过。
+    """
+
+
 FAILURE_GUARD = FailureGuard()
 EDGE_DOCKER_WARNING_PRINTED = False
+
+# 区域弹窗中的城市/区县列表是按需异步加载的，需要轮询等待而不是固定 sleep
+REGION_OPTION_WAIT_ROUNDS = 12
+REGION_OPTION_WAIT_SECONDS = 1.0
+REGION_SUBMIT_WAIT_ROUNDS = 15
 
 
 def _is_login_url(url: str) -> bool:
@@ -80,6 +93,21 @@ def _is_login_url(url: str) -> bool:
         return False
     lowered = url.lower()
     return "passport.goofish.com" in lowered or "mini_login" in lowered
+
+
+def _extract_choose_position(payload: dict) -> str:
+    """从搜索结果响应中取服务端回传的筛选地（choosePosition）。
+
+    未筛选时该字段为空，筛选生效后回显所选地区，是判断筛选是否真正生效的可靠依据。
+    """
+    result_list = ((payload.get("data") or {}).get("resultList")) or []
+    for item in result_list:
+        main = (((item.get("data") or {}).get("item") or {}).get("main")) or {}
+        args = (main.get("clickParam") or {}).get("args") or {}
+        value = str(args.get("choosePosition") or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _resolve_browser_channel() -> str:
@@ -478,6 +506,11 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
     if new_publish_option == "__none__":
         new_publish_option = ""
     region_filter = (task_config.get("region") or "").strip()
+    region_path = parse_region(region_filter)
+    # 服务端筛选地只到地级市，任务区域可能选到县级市，因此用候选集合校验
+    region_expected_positions = region_path.expected_positions
+    # 商品所在地（publishCity）校验的候选城市；为空表示只筛到省，不做城市级校验
+    region_expected_cities = region_path.expected_cities
 
     processed_links = set()
     history_run_id = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -555,6 +588,7 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
 
     async def _run_scrape_attempt(state_file: str, proxy_server: Optional[str]) -> int:
         processed_item_count = 0
+        filtered_out_count = 0
         stop_scraping = False
 
         if not os.path.exists(state_file):
@@ -801,103 +835,114 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                 if region_filter:
                     try:
                         area_trigger = page.get_by_text("区域", exact=True)
-                        if await area_trigger.count():
-                            await area_trigger.first.click()
-                            await random_sleep(1.5, 2)
-                            popover_candidates = page.locator("div.ant-popover")
-                            popover = popover_candidates.filter(
-                                has=page.locator(
-                                    ".areaWrap--FaZHsn8E, [class*='areaWrap']"
-                                )
-                            ).last
-                            if not await popover.count():
-                                popover = popover_candidates.filter(
-                                    has=page.get_by_text("重新定位")
-                                ).last
-                            if not await popover.count():
-                                popover = popover_candidates.filter(
-                                    has=page.get_by_text("查看")
-                                ).last
-                            if not await popover.count():
-                                print("LOG: 未找到区域弹窗，跳过区域筛选。")
-                                raise PlaywrightTimeoutError("region-popover-not-found")
-                            await popover.wait_for(state="visible", timeout=5000)
+                        if not await area_trigger.count():
+                            raise RegionFilterError("未找到「区域」筛选触发器")
+                        await area_trigger.first.click()
+                        await random_sleep(1.5, 2)
 
-                            # 列表容器：第一层 children 即省/市/区三列，不再强依赖具体类名，提升鲁棒性
-                            area_wrap = popover.locator(
-                                ".areaWrap--FaZHsn8E, [class*='areaWrap']"
+                        # 弹窗与选项的类名带 CSS Modules 哈希后缀，会随闲鱼前端发版变化，
+                        # 因此一律用 [class*='xxx'] 做前缀匹配，不写死哈希。
+                        popover = (
+                            page.locator("div.ant-popover")
+                            .filter(has=page.locator("[class*='areaWrap']"))
+                            .last
+                        )
+                        if not await popover.count():
+                            raise RegionFilterError("未找到区域筛选弹窗")
+                        await popover.wait_for(state="visible", timeout=5000)
+
+                        area_wrap = popover.locator("[class*='areaWrap']").first
+                        await area_wrap.wait_for(state="visible", timeout=5000)
+                        # 第一层 children 即 省/市/区 三列
+                        columns = area_wrap.locator(":scope > div")
+
+                        region_parts = [
+                            p.strip() for p in region_filter.split("/") if p.strip()
+                        ]
+
+                        async def _fetch_option(column, text_value: str):
+                            option = column.locator(
+                                "[class*='provItem']", has_text=text_value
                             ).first
-                            await area_wrap.wait_for(state="visible", timeout=3000)
-                            columns = area_wrap.locator(":scope > div")
-                            col_prov = columns.nth(0)
-                            col_city = columns.nth(1)
-                            col_dist = columns.nth(2)
-
-                            region_parts = [
-                                p.strip() for p in region_filter.split("/") if p.strip()
-                            ]
-
-                            async def _click_in_column(
-                                column_locator, text_value: str, desc: str
-                            ) -> None:
-                                option = column_locator.locator(
-                                    ".provItem--QAdOx8nD", has_text=text_value
-                                ).first
+                            for _ in range(REGION_OPTION_WAIT_ROUNDS):
                                 if await option.count():
-                                    await option.click()
-                                    await random_sleep(1.5, 2)
-                                    try:
-                                        await option.wait_for(
-                                            state="attached", timeout=1500
-                                        )
-                                        await option.wait_for(
-                                            state="visible", timeout=1500
-                                        )
-                                    except PlaywrightTimeoutError:
-                                        pass
-                                else:
-                                    print(f"LOG: 未找到{desc} '{text_value}'，跳过。")
+                                    return option
+                                # 城市/区县列是按需异步加载的，需要轮询等待
+                                await asyncio.sleep(REGION_OPTION_WAIT_SECONDS)
+                            return None
 
-                            if len(region_parts) >= 1:
-                                await _click_in_column(
-                                    col_prov, region_parts[0], "省份"
+                        async def _select_in_column(
+                            column_index: int, text_value: str, desc: str
+                        ) -> None:
+                            column = columns.nth(column_index)
+                            option = await _fetch_option(column, text_value)
+                            if option is None:
+                                raise RegionFilterError(
+                                    f"未找到{desc} '{text_value}'"
                                 )
-                                await random_sleep(1, 2)
-                            if len(region_parts) >= 2:
-                                await _click_in_column(
-                                    col_city, region_parts[1], "城市"
-                                )
-                                await random_sleep(1, 2)
-                            if len(region_parts) >= 3:
-                                await _click_in_column(
-                                    col_dist, region_parts[2], "区/县"
-                                )
-                                await random_sleep(1, 2)
+                            await option.click()
+                            await random_sleep(1, 1.5)
 
-                            search_btn = popover.locator(
-                                "div.searchBtn--Ic6RKcAb"
-                            ).first
-                            if await search_btn.count():
-                                try:
-                                    async with page.expect_response(
-                                        is_search_results_response,
-                                        timeout=20000,
-                                    ) as response_info:
-                                        await search_btn.click()
-                                        await random_sleep(2, 3)
-                                    final_response = await response_info.value
-                                except PlaywrightTimeoutError:
-                                    log_time("区域筛选提交超时，继续执行。")
-                            else:
-                                print(
-                                    "LOG: 未找到区域弹窗的“查看XX件宝贝”按钮，跳过提交。"
-                                )
+                        if len(region_parts) >= 1:
+                            await _select_in_column(0, region_parts[0], "省份")
+                        if len(region_parts) >= 2:
+                            await _select_in_column(1, region_parts[1], "城市")
+                        if len(region_parts) >= 3:
+                            await _select_in_column(2, region_parts[2], "区/县")
+
+                        search_btn = popover.locator("[class*='searchBtn']").first
+                        if not await search_btn.count():
+                            raise RegionFilterError(
+                                "未找到区域弹窗的“查看XX件宝贝”按钮"
+                            )
+                        # 按钮文案在选项加载期间是“筛选中...”，就绪后才是“查看N件宝贝”
+                        for _ in range(REGION_SUBMIT_WAIT_ROUNDS):
+                            if "查看" in (await search_btn.inner_text()):
+                                break
+                            await asyncio.sleep(REGION_OPTION_WAIT_SECONDS)
                         else:
-                            print("LOG: 未找到区域筛选触发器。")
-                    except PlaywrightTimeoutError:
-                        log_time(f"区域筛选 '{region_filter}' 请求超时，继续执行。")
+                            raise RegionFilterError("区域弹窗提交按钮未就绪")
+
+                        async with page.expect_response(
+                            is_search_results_response, timeout=20000
+                        ) as response_info:
+                            await search_btn.click()
+                            await random_sleep(2, 3)
+                        final_response = await response_info.value
+
+                        # 用服务端回传的筛选地确认筛选真的生效了（不能只看点击有没有成功）
+                        try:
+                            payload = await final_response.json()
+                        except Exception as e:
+                            raise RegionFilterError(
+                                f"读取搜索结果失败，无法确认区域筛选: {e}"
+                            ) from e
+                        applied_position = _extract_choose_position(payload)
+                        if not applied_position:
+                            raise RegionFilterError(
+                                "搜索结果未回传筛选地，无法确认区域筛选已生效"
+                            )
+                        if not matches_any(region_expected_positions, applied_position):
+                            raise RegionFilterError(
+                                f"服务端筛选地 '{applied_position}' 与期望的 "
+                                f"{'/'.join(region_expected_positions) or region_filter} 不一致"
+                            )
+                        log_time(
+                            f"区域筛选 '{region_filter}' 已生效，"
+                            f"服务端筛选地: {applied_position}"
+                        )
+                    except RegionFilterError as e:
+                        raise RegionFilterError(
+                            f"区域筛选 '{region_filter}' 未生效: {e}"
+                        ) from e
+                    except PlaywrightTimeoutError as e:
+                        raise RegionFilterError(
+                            f"区域筛选 '{region_filter}' 请求超时: {e}"
+                        ) from e
                     except Exception as e:
-                        print(f"LOG: 应用区域筛选 '{region_filter}' 失败: {e}")
+                        raise RegionFilterError(
+                            f"应用区域筛选 '{region_filter}' 失败: {e}"
+                        ) from e
 
                 if min_price or max_price:
                     price_container = page.locator(
@@ -1079,6 +1124,26 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                 )
                                 # ...[此处可添加更多从详情页解析出的商品信息]...
 
+                                # 商品所在城市来自详情接口 sellerDO.publishCity（精确到城市）
+                                item_city = str(
+                                    await safe_get(seller_do, "publishCity", default="")
+                                    or ""
+                                ).strip()
+                                if item_city:
+                                    item_data["宝贝所在地"] = item_city
+                                if (
+                                    region_expected_cities
+                                    and item_city
+                                    and not matches_any(region_expected_cities, item_city)
+                                ):
+                                    filtered_out_count += 1
+                                    processed_links.add(unique_key)
+                                    log_time(
+                                        f"商品所在地 '{item_city}' 不属于任务区域 "
+                                        f"'{region_filter}'，已跳过（累计跳过 {filtered_out_count} 条）。"
+                                    )
+                                    continue
+
                                 user_id = await safe_get(seller_do, "sellerId")
 
                                 # 构建基础记录
@@ -1173,6 +1238,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             except asyncio.CancelledError:
                 log_time("收到取消信号，正在终止当前爬虫任务...")
                 raise
+            except RegionFilterError:
+                # 地区筛选未生效属于可预期的失败，直接上抛给外层终止任务
+                raise
             except Exception as e:
                 if type(e).__name__ == "TargetClosedError":
                     log_time("浏览器已关闭，忽略后续异常（可能是任务被停止）。")
@@ -1193,6 +1261,11 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                     input("按回车键关闭浏览器...")
                 await browser.close()
 
+        if filtered_out_count:
+            log_time(
+                f"区域校验：共跳过 {filtered_out_count} 个不属于 "
+                f"'{region_filter}' 的商品（商品所在地与任务区域不符）。"
+            )
         return processed_item_count
 
     processed_item_count = 0
@@ -1300,6 +1373,11 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             last_error = str(e)
             print(f"检测到风控或验证触发: {e}")
             # 风控验证通常不是简单轮换能解决的，避免无意义重试。
+            break
+        except RegionFilterError as e:
+            last_error = str(e)
+            print(f"区域筛选未生效，终止任务（继续抓取将得到全国数据）: {e}")
+            # 选择器/页面结构问题不是轮换账号能解决的，避免无意义重试。
             break
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
