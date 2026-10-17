@@ -16,3 +16,4 @@ prompts/
 price_history/
 data/
 .backend.pid
+.workbuddy/

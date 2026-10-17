@@ -207,8 +207,10 @@ async function handleFetchModels() {
   isFetchingModels.value = true
   try {
     const result = await fetchAiModels({
+      profile_id: editingId.value ?? undefined,
       OPENAI_BASE_URL: form.base_url,
       OPENAI_API_KEY: form.api_key.trim() || undefined,
+      PROXY_URL: form.proxy_url || undefined,
     })
     if (result.success && result.models.length) {
       fetchedModels.value = result.models

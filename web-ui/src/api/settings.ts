@@ -53,6 +53,7 @@ export interface NotificationTestResponse {
 }
 
 export interface AiSettings {
+  profile_id?: number
   OPENAI_API_KEY?: string
   OPENAI_BASE_URL?: string
   OPENAI_MODEL_NAME?: string
