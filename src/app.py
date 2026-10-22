@@ -239,6 +239,10 @@ async def serve_spa(request: Request, full_path: str):
     Catch-all 路由，将所有非 API 请求重定向到 index.html
     这样可以支持 Vue Router 的 HTML5 History 模式
     """
+    # 未匹配到的 API 请求返回 JSON 404，避免把 index.html 当成接口响应
+    if full_path == "api" or full_path.startswith("api/"):
+        return JSONResponse(status_code=404, content={"detail": "接口不存在"})
+
     # 如果请求的是静态资源（如 favicon.ico），返回 404
     if full_path.endswith(('.ico', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.css', '.js', '.json')):
         return JSONResponse(status_code=404, content={"error": "资源未找到"})
