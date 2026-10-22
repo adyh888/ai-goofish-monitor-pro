@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from src.keyword_rule_engine import build_search_text, evaluate_keyword_rules
+from src.seller_credit import enforce_seller_credit_result
 
 
 SellerLoader = Callable[[str], Awaitable[dict]]
@@ -31,6 +32,7 @@ class ItemAnalysisJob:
     zhima_credit_text: Optional[str]
     registration_duration_text: str
     task_id: int = 0
+    seller_credit_min: str = "any"
 
 
 class ItemAnalysisDispatcher:
@@ -74,7 +76,12 @@ class ItemAnalysisDispatcher:
         record = copy.deepcopy(job.final_record)
         item_data = record.get("商品信息", {}) or {}
         record["卖家信息"] = await self._load_seller_info(job)
-        record["ai_analysis"] = await self._build_analysis_result(job, record)
+        analysis_result = await self._build_analysis_result(job, record)
+        record["ai_analysis"] = enforce_seller_credit_result(
+            analysis_result,
+            item_data.get("卖家信用等级"),
+            job.seller_credit_min,
+        )
         if await self._saver(record, job.keyword):
             self.completed_count += 1
         await self._notify_if_recommended(item_data, record["ai_analysis"])

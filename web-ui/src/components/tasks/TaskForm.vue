@@ -109,6 +109,8 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
         AUTO_ACCOUNT_VALUE,
       analyze_images: defaultValues.analyze_images ?? props.initialData.analyze_images ?? true,
       free_shipping: defaultValues.free_shipping ?? props.initialData.free_shipping ?? true,
+      seller_credit_min:
+        defaultValues.seller_credit_min || props.initialData.seller_credit_min || 'any',
       new_publish_option:
         defaultValues.new_publish_option || props.initialData.new_publish_option || '__none__',
       region: defaultValues.region || props.initialData.region || '',
@@ -132,6 +134,7 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
       account_strategy: props.defaultAccount ? 'fixed' : 'auto',
       account_state_file: props.defaultAccount || AUTO_ACCOUNT_VALUE,
       free_shipping: true,
+      seller_credit_min: 'any',
       new_publish_option: '__none__',
       region: '',
       decision_mode: 'ai',
@@ -403,6 +406,23 @@ function handleSubmit() {
         <Label for="personal-only" class="sm:text-right">{{ t('tasks.form.personalOnly') }}</Label>
         <div class="sm:col-span-3">
           <Switch id="personal-only" v-model="form.personal_only" />
+        </div>
+      </div>
+      <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">
+        <Label class="sm:text-right">{{ t('tasks.form.sellerCredit') }}</Label>
+        <div class="space-y-1 sm:col-span-3">
+          <Select v-model="form.seller_credit_min">
+            <SelectTrigger>
+              <SelectValue :placeholder="t('tasks.form.sellerCreditPlaceholder')" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="any">{{ t('tasks.form.sellerCreditOptions.any') }}</SelectItem>
+              <SelectItem value="good">{{ t('tasks.form.sellerCreditOptions.good') }}</SelectItem>
+              <SelectItem value="excellent">{{ t('tasks.form.sellerCreditOptions.excellent') }}</SelectItem>
+              <SelectItem value="perfect">{{ t('tasks.form.sellerCreditOptions.perfect') }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <p class="text-xs text-gray-500">{{ t('tasks.form.sellerCreditHint') }}</p>
         </div>
       </div>
       <div class="grid gap-2 sm:grid-cols-4 sm:items-center sm:gap-4">

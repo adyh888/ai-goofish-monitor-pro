@@ -126,6 +126,7 @@ class Task(BaseModel):
     account_state_file: Optional[str] = None
     account_strategy: Literal["auto", "fixed", "rotate"] = "auto"
     free_shipping: bool = True
+    seller_credit_min: Literal["any", "good", "excellent", "perfect"] = "any"
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
     decision_mode: Literal["ai", "keyword"] = "ai"
@@ -177,6 +178,7 @@ class TaskCreate(BaseModel):
     account_state_file: Optional[str] = None
     account_strategy: Literal["auto", "fixed", "rotate"] = "auto"
     free_shipping: bool = True
+    seller_credit_min: Literal["any", "good", "excellent", "perfect"] = "any"
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
     decision_mode: Literal["ai", "keyword"] = "ai"
@@ -244,6 +246,7 @@ class TaskUpdate(BaseModel):
     account_state_file: Optional[str] = None
     account_strategy: Optional[Literal["auto", "fixed", "rotate"]] = None
     free_shipping: Optional[bool] = None
+    seller_credit_min: Optional[Literal["any", "good", "excellent", "perfect"]] = None
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
     decision_mode: Optional[Literal["ai", "keyword"]] = None
@@ -308,6 +311,7 @@ class TaskGenerateRequest(BaseModel):
     account_state_file: Optional[str] = None
     account_strategy: Literal["auto", "fixed", "rotate"] = "auto"
     free_shipping: bool = True
+    seller_credit_min: Literal["any", "good", "excellent", "perfect"] = "any"
     new_publish_option: Optional[str] = None
     region: Optional[str] = None
     decision_mode: Literal["ai", "keyword"] = "ai"

@@ -1182,6 +1182,9 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                         zhima_credit_text=zhima_credit_text,
                                         registration_duration_text=registration_duration_text,
                                         task_id=int(task_config.get("id") or 0),
+                                        seller_credit_min=str(
+                                            task_config.get("seller_credit_min") or "any"
+                                        ),
                                     )
                                 )
 

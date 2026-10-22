@@ -39,6 +39,7 @@ SCHEMA_STATEMENTS = (
         account_state_file TEXT,
         account_strategy TEXT NOT NULL,
         free_shipping INTEGER NOT NULL,
+        seller_credit_min TEXT NOT NULL DEFAULT 'any',
         new_publish_option TEXT,
         region TEXT,
         decision_mode TEXT NOT NULL,
@@ -200,7 +201,17 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     _migrate_result_items_status(conn)
     _migrate_membership_user_scope(conn)
+    _migrate_task_seller_credit_min(conn)
     conn.commit()
+
+
+def _migrate_task_seller_credit_min(conn: sqlite3.Connection) -> None:
+    """为 tasks 表添加 seller_credit_min 列（存量任务默认不限）。"""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    if "seller_credit_min" not in cols:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN seller_credit_min TEXT NOT NULL DEFAULT 'any'"
+        )
 
 
 def _migrate_result_items_status(conn: sqlite3.Connection) -> None:

@@ -60,6 +60,11 @@ const resolveAccountStrategyLabel = (task: Task) => {
   return t('tasks.table.accountAuto')
 }
 
+const resolveSellerCreditLabel = (task: Task) => {
+  const value = task.seller_credit_min || 'any'
+  return t(`tasks.table.sellerCredit.${value}`)
+}
+
 const resolveAccountName = (task: Task) => {
   if (!task.account_state_file) return t('tasks.table.systemSelected')
   const segments = task.account_state_file.split('/')
@@ -173,6 +178,9 @@ const emit = defineEmits<{
                 </Badge>
                 <Badge variant="outline" class="border-slate-200/70 bg-slate-50 text-slate-500">
                   {{ task.free_shipping ? t('tasks.table.freeShipping') : t('common.all') }}
+                </Badge>
+                <Badge v-if="!isKeywordMode(task)" variant="outline" class="border-slate-200/70 bg-slate-50 text-slate-500">
+                  {{ resolveSellerCreditLabel(task) }}
                 </Badge>
                 <Badge v-if="task.region" variant="outline" class="border-slate-200/70 bg-slate-50 text-slate-500">
                   <MapPin class="mr-1 h-3 w-3" />
@@ -393,6 +401,9 @@ const emit = defineEmits<{
                   </Badge>
                   <Badge variant="outline" class="text-[9px] h-4 border-slate-100 text-slate-400 px-1.5 font-bold bg-white/40">
                     {{ task.free_shipping ? t('tasks.table.freeShipping') : t('common.all') }}
+                  </Badge>
+                  <Badge v-if="!isKeywordMode(task)" variant="outline" class="text-[9px] h-4 border-slate-100 text-slate-400 px-1.5 font-bold bg-white/40">
+                    {{ resolveSellerCreditLabel(task) }}
                   </Badge>
                   <div v-if="task.region" class="flex items-center gap-0.5 text-[9px] font-bold text-slate-400 px-1.5 h-4 bg-slate-50/50 rounded border border-slate-100 truncate max-w-[80px]">
                     <MapPin class="w-2.5 h-2.5" /> {{ task.region }}

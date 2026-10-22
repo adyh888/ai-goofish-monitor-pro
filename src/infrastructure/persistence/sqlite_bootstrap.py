@@ -108,9 +108,10 @@ def _import_tasks_if_needed(conn, legacy_config_file: str | None) -> None:
                 id, task_name, enabled, keyword, description, analyze_images,
                 max_pages, personal_only, min_price, max_price, cron,
                 ai_prompt_base_file, ai_prompt_criteria_file, account_state_file,
-                account_strategy, free_shipping, new_publish_option, region,
-                decision_mode, keyword_rules_json, is_running
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                account_strategy, free_shipping, seller_credit_min,
+                new_publish_option, region, decision_mode, keyword_rules_json,
+                is_running
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 index,
@@ -129,6 +130,7 @@ def _import_tasks_if_needed(conn, legacy_config_file: str | None) -> None:
                 raw_task.get("account_state_file"),
                 raw_task.get("account_strategy", "auto"),
                 _as_int(raw_task.get("free_shipping", True)),
+                raw_task.get("seller_credit_min", "any"),
                 raw_task.get("new_publish_option"),
                 raw_task.get("region"),
                 raw_task.get("decision_mode", "ai"),

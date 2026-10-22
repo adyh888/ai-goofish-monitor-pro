@@ -31,9 +31,60 @@ META_PROMPT_TEMPLATE = """
 2.  保留范例中的 `[V6.3 核心升级]`、`[V6.4 逻辑修正]` 等版本标记，这有助于保持格式一致性。
 3.  将范例中所有与 "MacBook" 相关的内容，替换为与用户需求商品相关的内容。
 4.  思考并生成针对新商品类型的“一票否决硬性原则”和“危险信号清单”。
+5.  不要在分析标准中写死卖家信用等级门槛（例如“必须是卖家信用极好”）；卖家信用由任务设置单独控制。如需提及，只能写“卖家信用仅作参考，不得作为否决理由”。
 """
 
 ProgressCallback = Callable[[str, str], Awaitable[None]]
+
+
+_SELLER_CREDIT_RULES = {
+    "any": (
+        "不限。卖家信用等级只作为参考信息，禁止因为卖家信用等级（包括“暂无”）"
+        "直接或间接否决商品。"
+    ),
+    "good": (
+        "良好及以上。卖家信用等级为“良好”“优秀”或“极好”时视为满足；"
+        "低于“良好”时才可以把信用等级作为否决理由。"
+    ),
+    "excellent": (
+        "优秀及以上。卖家信用等级为“优秀”或“极好”时视为满足；"
+        "仅为“良好”及以下时才可以把信用等级作为否决理由。"
+    ),
+    "perfect": (
+        "极好。仅“卖家信用极好”视为满足；其他信用等级可以把信用等级作为否决理由。"
+    ),
+}
+
+
+def build_seller_credit_rule(seller_credit_min: Optional[str]) -> str:
+    """生成任务级卖家信用门槛说明，用于覆盖判据文件里的信用硬规则。"""
+    rule = _SELLER_CREDIT_RULES.get(
+        str(seller_credit_min or "any").strip().lower(),
+        _SELLER_CREDIT_RULES["any"],
+    )
+    return (
+        "### 【任务级卖家信用门槛（最高优先级）】\n"
+        f"本任务要求的卖家信用门槛：{rule}\n"
+        "- 商品中的 `卖家信用等级` 可能形如：卖家信用极好 / 卖家信用优秀 / "
+        "卖家信用良好 / 卖家信用一般 / 暂无。\n"
+        "- 达到门槛时，不得以信用等级为由否决商品或降低推荐结论。\n"
+        "- 低于门槛时，才可以把“卖家信用未达门槛”作为否决理由。\n"
+        "- 信用信息缺失或为“暂无”时，按信息缺失处理并标记 NEEDS_MANUAL_CHECK，"
+        "不得仅因此直接判定不推荐。\n"
+        "本节规则优先级高于上文所有“一票否决硬性原则”和评分细则，"
+        "若与上文冲突，一律以本节为准。"
+    )
+
+
+def apply_seller_credit_override(
+    prompt_text: str,
+    seller_credit_min: Optional[str],
+) -> str:
+    """把任务级信用门槛追加到分析 Prompt 末尾，确保覆盖判据中的旧规则。"""
+    if not prompt_text or not prompt_text.strip():
+        return prompt_text
+    return f"{prompt_text.rstrip()}\n\n{build_seller_credit_rule(seller_credit_min)}"
+
 
 
 async def _report_progress(

@@ -9,7 +9,9 @@ import re
 
 from src.config import STATE_FILE
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
+from src.prompt_utils import apply_seller_credit_override
 from src.scraper import scrape_xianyu
+from src.seller_credit import rewrite_seller_credit_rules
 
 
 async def main():
@@ -148,9 +150,19 @@ async def main():
                     base_prompt = f_base.read()
                 with open(task["ai_prompt_criteria_file"], 'r', encoding='utf-8') as f_criteria:
                     criteria_text = f_criteria.read()
+                # 按任务门槛改写判据正文里的卖家信用硬规则
+                criteria_text = rewrite_seller_credit_rules(
+                    criteria_text,
+                    task.get('seller_credit_min'),
+                )
                 
                 # 动态组合成最终的Prompt
                 task['ai_prompt_text'] = base_prompt.replace("{{CRITERIA_SECTION}}", criteria_text)
+                # 任务级卖家信用门槛优先于判据文件中的旧规则
+                task['ai_prompt_text'] = apply_seller_credit_override(
+                    task['ai_prompt_text'],
+                    task.get('seller_credit_min'),
+                )
                 
                 # 验证生成的prompt是否有效
                 if len(task['ai_prompt_text']) < 100:
@@ -169,7 +181,14 @@ async def main():
         elif task.get("enabled", False) and task.get("ai_prompt_file"):
             try:
                 with open(task["ai_prompt_file"], 'r', encoding='utf-8') as f:
-                    task['ai_prompt_text'] = f.read()
+                    task['ai_prompt_text'] = rewrite_seller_credit_rules(
+                        f.read(),
+                        task.get('seller_credit_min'),
+                    )
+                task['ai_prompt_text'] = apply_seller_credit_override(
+                    task['ai_prompt_text'],
+                    task.get('seller_credit_min'),
+                )
                 print(f"✅ 任务 '{task['task_name']}' 的prompt文件读取成功，长度: {len(task['ai_prompt_text'])} 字符")
             except FileNotFoundError:
                 print(f"警告: 任务 '{task['task_name']}' 的prompt文件 '{task['ai_prompt_file']}' 未找到，该任务的AI分析将被跳过。")

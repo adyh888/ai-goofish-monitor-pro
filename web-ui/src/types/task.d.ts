@@ -18,6 +18,7 @@ export interface Task {
   account_state_file?: string | null;
   account_strategy: 'auto' | 'fixed' | 'rotate';
   free_shipping?: boolean;
+  seller_credit_min?: 'any' | 'good' | 'excellent' | 'perfect';
   new_publish_option?: string | null;
   region?: string | null;
   decision_mode: 'ai' | 'keyword';
@@ -69,6 +70,7 @@ export interface TaskGenerateRequest {
   account_state_file?: string | null;
   account_strategy?: 'auto' | 'fixed' | 'rotate';
   free_shipping?: boolean;
+  seller_credit_min?: 'any' | 'good' | 'excellent' | 'perfect';
   new_publish_option?: string | null;
   region?: string | null;
   decision_mode?: 'ai' | 'keyword';
